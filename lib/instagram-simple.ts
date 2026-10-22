@@ -6,7 +6,8 @@ import { createSerpApiProvider } from "@/lib/providers/serpapi";
 import type { SerpApiOrganicResult, SerpApiSearchInformation } from "@/lib/providers/types";
 import { getSerpApiKey, getResearchConfig } from "@/lib/env";
 import { logger } from "@/lib/logger";
-import type { ResearchMeta, ResolvedDateRange } from "@/types";
+import type { ResearchMeta } from "@/types";
+import { shortcodeFromUrl, dateFromShortcode } from "@/lib/research/igDate";
 
 export interface SimpleInstagramPost {
   url: string;
@@ -22,31 +23,25 @@ export interface SimpleInstagramPost {
   snippet: string;
 }
 
-export interface SimpleInstagramResult {
-  estimateLine: string | null;
-  geminiAnswer: string | null;
-  topPosts: string[];
-  allPosts: SimpleInstagramPost[];
-  entity: string;
-  rangeLabel: string;
-  rawSearchInfo: SerpApiSearchInformation | null;
-  rawFirstOrganicResult: SerpApiOrganicResult | null;
-}
-
 const entityExtractionSchema = z.object({
   entity: z.string().nullable(),
-  intent: z.enum(["count", "narrative", "show_more", "other"]),
+  isCorrection: z.boolean(),
+  intent: z.enum(["count", "narrative", "show_more", "chat", "unclear"]),
 });
 
 export type EntityExtractionResult = z.infer<typeof entityExtractionSchema>;
 
 const EXTRACTION_SYSTEM_INSTRUCTION = `You are an entity extraction assistant for an Instagram research tool.
 
-Given the last 6 messages of a conversation, extract the primary entity (person, brand, hashtag, event) the user wants Instagram posts for.
+Given the last 6 USER messages of a conversation, extract the primary entity (person, brand, hashtag, event) the user wants Instagram posts for.
 
-IGNORE these words - they are NEVER entities: tell, tll, me, total, number, numbr, post, posts, done, don, him, her, them, insta, instagram, last, days
+IGNORE these words - they are NEVER entities: tell, tll, me, total, number, numbr, post, posts, done, don, him, her, them, insta, instagram, last, days, give, show, reels, likes
 
-A pronoun (him/her/them/his) means the entity from the previous message.
+A pronoun (him/her/them/his) means the entity from the previous USER message.
+
+Expand well-known abbreviations and nicknames to the full name ("srk" -> "Shah Rukh Khan"); if unsure, keep the text as the user wrote it.
+
+Corrections ("i am asking for srk not salman khan", "no, I meant X", "not him, X"): isCorrection = true, entity = X; re-run the previous user question (same intent, same range) with entity X.
 
 Return null for entity if there is no clear subject.
 
@@ -54,18 +49,19 @@ Also identify the intent:
 - "count" = user wants a post count/number (how many posts, total posts, count)
 - "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz
 - "show_more" = user explicitly wants more posts/results
-- "other" = anything else
+- "chat" = greeting, hi, thanks, bye, how are you, what can you do, small talk
+- "unclear" = no entity, vague, or ambiguous name
 
 Return ONLY valid JSON matching the schema.`;
 
 const entityExtractionGeminiSchema = toGeminiSchema(entityExtractionSchema);
 
 async function extractEntityWithGemini(
-  history: string[],
+  userHistory: string[],
   gemini: GeminiClient
 ): Promise<EntityExtractionResult> {
-  const lastSix = history.slice(-6);
-  const prompt = `Conversation:\n${lastSix.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
+  const lastSixUser = userHistory.slice(-6);
+  const prompt = `Last 6 user messages:\n${lastSixUser.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
 
   const response = await gemini.generateStructured({
     systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
@@ -127,7 +123,7 @@ function parseCommentsNum(text: string): number | null {
 
 function extractAccountFromText(title: string, snippet: string | null, displayedLink: string | null): string {
   const combined = title + " " + (snippet ?? "") + " " + (displayedLink ?? "");
-  
+
   const parenMatch = combined.match(/\(@([A-Za-z0-9._]{1,30})\)/);
   if (parenMatch) return parenMatch[1].toLowerCase();
 
@@ -150,11 +146,6 @@ function extractGoogleRelativeTime(snippet: string | null): string | null {
 
 function isPostUrl(url: string): boolean {
   return /\/p\/|\/reel\/|\/reels\/|\/tv\//i.test(url);
-}
-
-function shortcodeFromUrl(url: string): string | null {
-  const match = url.match(/(?:\/p\/|\/reel\/|\/reels\/|\/tv\/)([A-Za-z0-9_-]+)/);
-  return match ? match[1] : null;
 }
 
 function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
@@ -234,6 +225,14 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
     }
   }
 
+  if (!dateISO) {
+    const d = dateFromShortcode(shortcode);
+    if (d) {
+      dateISO = d.toISOString();
+      dateText = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    }
+  }
+
   const snippetForGemini = (snippet ?? "").replace(/\s+/g, " ").slice(0, 220);
 
   return {
@@ -304,6 +303,10 @@ async function searchInstagramPosts(
   const rawOrganicResults = firstPage.rawOrganicResults;
   const searchInformation = firstPage.searchInformation;
 
+  if (rawOrganicResults.length > 0) {
+    logger.debug("Raw organic result sample", { raw: rawOrganicResults[0] });
+  }
+
   const posts: SimpleInstagramPost[] = [];
   const seenShortcodes = new Set<string>();
   let rawFirstPageResult: SerpApiOrganicResult | null = null;
@@ -350,7 +353,6 @@ async function fetchMorePosts(
   let searchesUsed = 1;
 
   for (let page = 2; page <= 10 && searchesUsed < 12; page += 1) {
-
     const additionalResult = await provider.searchWithInfo?.(
       {
         query,
@@ -401,27 +403,15 @@ async function analyzeWithGemini(
   input: GeminiAnalysisInput,
   gemini: GeminiClient
 ): Promise<string> {
-  const postsText = input.posts.map((p, i) => 
+  const postsText = input.posts.map((p, i) =>
     `${i + 1}. ${p.title} | @${p.account} | ${p.date ?? "no date"} | ${p.likes ?? "no likes"} | ${p.snippet}`
   ).join("\n");
 
-  let systemInstruction = "";
-  if (input.intent === "count") {
-    systemInstruction = `You are a PR intelligence analyst. The user wants to know about Instagram posts for "${input.entity}".
-    
-    Write EXACTLY ONE sentence summarizing the key themes or activity. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.
-    Themes as short bullets. Attribute claims. Use "reported" for allegations.
-    Max 1 sentence.`;
-  } else if (input.intent === "narrative") {
-    systemInstruction = `You are a PR intelligence analyst. The user wants to know what people are saying on Instagram about "${input.entity}".
-    
-    Write a short answer (max 8 sentences). Themes as short bullets. Attribute claims. Use "reported" for allegations.
-    Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
-  } else {
-    systemInstruction = `You are a PR intelligence analyst. Provide a brief answer about Instagram posts for "${input.entity}".
-    
-    Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
-  }
+  const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian English, short sentences, warm but direct, no corporate words, no emoji in results (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Use only the posts you are given; attribute claims ('according to posts by ...') and say 'reported' for allegations. Never write post counts, likes totals or estimate numbers yourself; the app shows those. If you do not understand, ask one short question. If the posts do not cover the question, say so in one line.
+
+${input.intent === "count" ? `Write EXACTLY ONE sentence summarizing the key themes or activity. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.` : 
+  input.intent === "narrative" ? `Write a short answer (max 8 sentences). Themes as short bullets. Attribute claims. Use "reported" for allegations. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.` :
+  `Provide a brief answer about Instagram posts for "${input.entity}". Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`}`;
 
   const prompt = `Instagram posts for "${input.entity}" (up to 30 posts):\n${postsText}`;
 
@@ -440,6 +430,25 @@ async function analyzeWithGemini(
   return parsed.data.answer;
 }
 
+async function chatWithGemini(message: string, gemini: GeminiClient): Promise<string> {
+  const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian short sentences, warm but direct, no corporate words, no emoji (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Keep it to 1-3 lines.`;
+  
+  const schema = z.object({ answer: z.string() });
+  
+  const response = await gemini.generateStructured({
+    systemInstruction,
+    userContent: message,
+    responseSchema: toGeminiSchema(schema),
+    temperature: 0.7,
+  });
+  
+  const parsed = schema.safeParse(response);
+  if (!parsed.success) {
+    return "Hey! Want to check Instagram buzz for someone?";
+  }
+  return parsed.data.answer;
+}
+
 function sortPostsByLikes(posts: SimpleInstagramPost[]): SimpleInstagramPost[] {
   const postsWithLikes = posts.filter(p => p.likesNum !== null);
   if (postsWithLikes.length >= 3) {
@@ -448,37 +457,55 @@ function sortPostsByLikes(posts: SimpleInstagramPost[]): SimpleInstagramPost[] {
   return posts;
 }
 
-function formatPostCard(post: SimpleInstagramPost): string {
-  const lines: string[] = [];
-  
-  lines.push(`**${post.title}**`);
-  
-  const metaParts: string[] = [];
-  metaParts.push("Instagram");
-  metaParts.push(`· ${post.account}`);
-  if (post.dateText) metaParts.push(post.dateText);
-  if (post.googleRelativeTime) metaParts.push(post.googleRelativeTime);
-  lines.push(metaParts.join(" · "));
-  
-  if (post.likesText) lines.push(post.likesText);
-  if (post.commentsText) lines.push(post.commentsText);
-  
-  if (post.snippet) lines.push(post.snippet);
-  
-  lines.push(post.url);
-  
-  return lines.join("\n");
+function formatDateDisplay(post: SimpleInstagramPost): string {
+  if (post.googleRelativeTime) return post.googleRelativeTime;
+  if (post.dateText) return post.dateText;
+  return "—";
 }
 
-export interface SimpleInstagramResult {
-  estimateLine: string | null;
-  geminiAnswer: string | null;
-  topPosts: string[];
-  allPosts: SimpleInstagramPost[];
-  entity: string;
-  rangeLabel: string;
-  rawSearchInfo: SerpApiSearchInformation | null;
-  rawFirstOrganicResult: SerpApiOrganicResult | null;
+function truncateCaption(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen - 1).trimEnd() + "…";
+}
+
+function renderPostsTable(posts: SimpleInstagramPost[], startIndex: number = 0): string {
+  if (posts.length === 0) return "";
+  
+  const headers = ["#", "Title", "Account", "Caption", "Likes", "Comments", "Date"];
+  const rows = posts.map((post, i) => [
+    String(startIndex + i + 1),
+    `<a href="${post.url}" target="_blank" rel="noopener noreferrer" class="underline hover:text-primary">${truncateCaption(post.title, 60)}</a>`,
+    post.account === "unknown" ? "—" : `@${post.account}`,
+    post.snippet ? truncateCaption(post.snippet, 140) : "—",
+    post.likesText ?? "—",
+    post.commentsText ?? "—",
+    formatDateDisplay(post),
+  ]);
+
+  let table = "<div class=\"overflow-x-auto\"><table class=\"w-full text-sm border-collapse\">";
+  table += "<thead><tr class=\"border-b border-border\">";
+  for (const h of headers) {
+    table += `<th class="text-left p-2 font-medium text-muted-foreground">${h}</th>`;
+  }
+  table += "</tr></thead><tbody>";
+  for (const row of rows) {
+    table += "<tr class=\"border-b border-border/50\">";
+    for (const cell of row) {
+      table += `<td class="p-2">${cell}</td>`;
+    }
+    table += "</tr>";
+  }
+  table += "</tbody></table></div>";
+  
+  return table;
+}
+
+function renderLikesSummary(posts: SimpleInstagramPost[]): string | null {
+  const postsWithLikes = posts.filter(p => p.likesNum !== null);
+  if (postsWithLikes.length < 3) return null;
+  
+  const total = postsWithLikes.reduce((sum, p) => sum + (p.likesNum ?? 0), 0);
+  return `<p class="mt-2 text-xs text-muted-foreground">Likes shown on these posts: ~${formatNumberWithSeparators(total)} <span class="italic">(Only posts where Google shows likes are counted.)</span></p>`;
 }
 
 export async function runSimpleInstagramResearch(
@@ -529,8 +556,7 @@ export async function runSimpleInstagramResearch(
   }
 
   let entity: string | null = null;
-  let intent: "count" | "narrative" | "show_more" | "other" = "other";
-
+  let intent: "count" | "narrative" | "show_more" | "chat" | "unclear" = "narrative";
   try {
     const extraction = await extractEntityWithGemini(history, gemini);
     entity = extraction.entity;
@@ -543,9 +569,17 @@ export async function runSimpleInstagramResearch(
     };
   }
 
-  if (!entity) {
+  if (intent === "chat") {
+    const reply = await chatWithGemini(question, gemini);
     return {
-      message: "Which person, brand or hashtag should I look into?",
+      message: reply,
+      meta: { ...emptyMeta, status: "ok", intent: "overview", integrations: { gemini: { configured: true, model: "gemini-1.5-flash" }, serpapi: { configured: true }, newsapi: { configured: false } } }
+    };
+  }
+
+  if (intent === "unclear" || !entity) {
+    return {
+      message: "Which person or brand should I look at?",
       meta: { ...emptyMeta, limitations: ["No entity identified"] }
     };
   }
@@ -560,65 +594,91 @@ export async function runSimpleInstagramResearch(
     rangeLabel = `${new Date(rangeFrom).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} – ${new Date(rangeTo).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
   } else {
     const preset = datePreset ?? "last_7_days";
-const { resolveDateRangeApp } = await import("@/lib/research/dateRange");
-  const resolved = resolveDateRangeApp({ preset: preset as "24h" | "7d" | "30d" | "90d" | "custom" }, now);
+    const { resolveDateRangeApp } = await import("@/lib/research/dateRange");
+    const resolved = resolveDateRangeApp({ preset: preset as "24h" | "7d" | "30d" | "90d" | "custom" }, now);
     rangeFrom = resolved.from;
     rangeTo = resolved.to;
     rangeLabel = resolved.label;
   }
 
   const searchResult = await searchInstagramPosts(entity, rangeFrom, rangeTo, config, signal);
-  const { posts, searchInformation, rawFirstPageResult } = searchResult;
+  const { posts, searchInformation } = searchResult;
 
   let estimateLine: string | null = null;
   if (searchInformation?.total_results) {
-    const total = typeof searchInformation.total_results === "string" 
-      ? parseInt(searchInformation.total_results, 10) 
+    const total = typeof searchInformation.total_results === "string"
+      ? parseInt(searchInformation.total_results, 10)
       : searchInformation.total_results;
     if (Number.isFinite(total)) {
       estimateLine = `About ${formatNumberWithSeparators(total)} results on Google for ${entity} on Instagram, ${rangeLabel}.`;
     }
   }
 
-  let geminiAnswer: string | null = null;
-  if (posts.length > 0) {
-    const postsForGemini = posts.slice(0, 30).map(p => ({
-      title: p.title,
-      account: p.account,
-      date: p.dateText ?? p.googleRelativeTime ?? p.dateISO,
-      likes: p.likesText,
-      snippet: p.snippet,
-    }));
-    try {
-      geminiAnswer = await analyzeWithGemini({ posts: postsForGemini, intent, entity }, gemini);
-    } catch (error) {
-      logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
-    }
-  }
-
   const sortedPosts = sortPostsByLikes(posts);
-  const topPosts = sortedPosts.slice(0, 5).map(formatPostCard);
+  const topPosts = sortedPosts.slice(0, 5);
   const allPosts = sortedPosts;
 
   const lines: string[] = [];
   
   if (estimateLine) {
     lines.push(estimateLine);
-    lines.push("");
   }
   
-  if (geminiAnswer) {
-    lines.push(geminiAnswer);
+  lines.push(`Showing results for ${entity}`);
+  lines.push("");
+
+  if (intent === "show_more" || question.toLowerCase().includes("show more") || question.toLowerCase().includes("more posts")) {
+    lines.push(`**All ${allPosts.length} posts**`);
     lines.push("");
+    
+    for (let i = 0; i < allPosts.length; i += 10) {
+      const pagePosts = allPosts.slice(i, i + 10);
+      lines.push(renderPostsTable(pagePosts, i));
+      lines.push("");
+    }
+  } else if (posts.length > 0) {
+    let geminiAnswer: string | null = null;
+    try {
+      const postsForGemini = posts.slice(0, 30).map(p => ({
+        title: p.title,
+        account: p.account,
+        date: p.dateText ?? p.googleRelativeTime ?? p.dateISO,
+        likes: p.likesText,
+        snippet: p.snippet,
+      }));
+      geminiAnswer = await analyzeWithGemini({ posts: postsForGemini, intent: intent === "count" ? "count" : "narrative", entity }, gemini);
+    } catch (error) {
+      logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
+    }
+
+    if (geminiAnswer) {
+      lines.push(geminiAnswer);
+      lines.push("");
+    }
+
+    if (topPosts.length > 0) {
+      lines.push("**Top posts**");
+      lines.push("");
+      lines.push(renderPostsTable(topPosts));
+      const likesSummary = renderLikesSummary(topPosts);
+      if (likesSummary) {
+        lines.push(likesSummary);
+      }
+      lines.push("");
+    }
+
+    if (allPosts.length > 5) {
+      lines.push(`<button data-show-more="true" class="text-primary underline hover:text-primary mt-2 inline-block">Show all ${allPosts.length} posts</button>`);
+    }
+
+    lines.push("");
+    lines.push("Want more posts, another person, or a different date range?");
+  } else {
+    lines.push(`No Instagram posts found for ${entity} in ${rangeLabel}.`);
+    lines.push("");
+    lines.push("Try a different name, date range, or check spelling?");
   }
-  
-  if (topPosts.length > 0) {
-    lines.push("**Top posts**");
-    lines.push("");
-    lines.push(topPosts.join("\n\n"));
-    lines.push("");
-  }
-  
+
   const message = lines.join("\n").trim();
 
   const limitations = [
@@ -664,14 +724,14 @@ export async function runShowMorePosts(
   const sortedPosts = sortPostsByLikes(allPosts);
   
   const lines: string[] = [];
-  lines.push(`**Show all ${allPosts.length} posts**`);
+  lines.push(`Showing results for ${entity}`);
+  lines.push("");
+  lines.push(`**All ${allPosts.length} posts**`);
   lines.push("");
   
   for (let i = 0; i < sortedPosts.length; i += 10) {
     const pagePosts = sortedPosts.slice(i, i + 10);
-    lines.push(`--- Page ${Math.floor(i / 10) + 1} ---`);
-    lines.push("");
-    lines.push(pagePosts.map(formatPostCard).join("\n\n"));
+    lines.push(renderPostsTable(pagePosts, i));
     lines.push("");
   }
   

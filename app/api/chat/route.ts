@@ -46,7 +46,25 @@ function isInstagramSocialQuestion(message: string): boolean {
     "instagram", "insta", "ig", "reel", "reels", "post", "posts", 
     "@", "hashtag", "#", "follower", "following", "profile", "account"
   ];
-  return instagramKeywords.some(keyword => normalized.includes(keyword));
+  if (instagramKeywords.some(keyword => normalized.includes(keyword))) return true;
+  
+  // Default to Instagram for person/brand/hashtag queries when no other platform is mentioned
+  const otherPlatformKeywords = ["news", "twitter", "x.com", "reddit", "web", "article", "report"];
+  if (otherPlatformKeywords.some(k => normalized.includes(k))) return false;
+  
+  // Heuristic: looks like a name/brand query (capitalized words, not a question word)
+  const questionWords = ["what", "who", "when", "where", "why", "how", "which", "can", "could", "would", "should", "is", "are", "do", "does", "did", "will", "show", "give", "tell"];
+  const startsWithQuestionWord = questionWords.some(q => normalized.startsWith(q + " "));
+  if (startsWithQuestionWord) return false;
+  
+  // If it looks like a name (multiple capitalized words or single word > 2 chars)
+  const words = message.trim().split(/\s+/);
+  const looksLikeName = words.length >= 1 && words.some(w => w.length > 2 && /^[A-Z]/.test(w));
+  return looksLikeName;
+}
+
+function getUserHistory(history: Array<{ role: string; content: string }>): string[] {
+  return history.filter(t => t.role === "user").map(t => t.content);
 }
 
 async function lightweightResponse(message: string, conversationId: string): Promise<Response> {
@@ -133,10 +151,10 @@ export async function POST(request: Request): Promise<Response> {
         })
       : null;
 
-    const history = parsed.data.history.map((turn) => turn.content);
+    const userHistory = getUserHistory(parsed.data.history);
     const outcome = await runSimpleInstagramResearch(
       message,
-      history,
+      userHistory,
       parsed.data.dateRange?.from ?? null,
       parsed.data.dateRange?.to ?? null,
       parsed.data.dateRange?.preset ?? null,
