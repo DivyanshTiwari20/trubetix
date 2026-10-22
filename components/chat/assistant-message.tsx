@@ -1,27 +1,15 @@
 "use client";
 
-import { AlertTriangle, RotateCcw, ChevronDown, ExternalLink } from "lucide-react";
+import { AlertTriangle, RotateCcw, ChevronDown } from "lucide-react";
 import { ResearchMetaDetails } from "@/components/research/research-meta";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { unique } from "@/lib/utils";
-import { formatAbsoluteDate } from "@/lib/format";
-import { SOURCE_TYPE_LABELS } from "@/lib/config";
 import type { ChatMessage, ResearchResult } from "@/types";
 import { AnalysisSection, ClaimList, ConfidenceBadge } from "./analysis-parts";
 import { MessageActions } from "./message-actions";
 import { SourceList, SourceCard } from "./source-card";
+import { MarkdownContent } from "./markdown-content";
 import { useState } from "react";
-
-function Limitations({ items }: { items: string[] }) {
-  return (
-    <ul className="list-disc space-y-1 pl-4 text-sm text-muted-foreground">
-      {items.map((item) => (
-        <li key={item}>{item}</li>
-      ))}
-    </ul>
-  );
-}
 
 function PostCountResults({ sources }: { sources: ResearchResult[] }) {
   const [showAll, setShowAll] = useState(false);
@@ -141,16 +129,9 @@ export function AssistantMessage({
   const isPostCount = message.meta?.intentKind === "post_count";
 
   if (!analysis) {
-    const limitations = unique([
-      ...(message.meta?.limitations ?? []),
-      ...(message.meta?.warnings ?? []),
-    ]);
     return (
       <div className="space-y-4">
-        <div className="rounded-lg border border-warning/40 bg-warning/10 p-3">
-          <Badge variant="warning">Limited response</Badge>
-          <p className="mt-2 text-sm leading-relaxed">{message.content}</p>
-        </div>
+        <MarkdownContent content={message.content} className="mt-2 text-sm" />
         {isPostCount && message.sources.length > 0 ? (
           <PostCountResults sources={message.sources} />
         ) : message.sources.length > 0 ? (
@@ -158,22 +139,11 @@ export function AssistantMessage({
             <SourceList sources={message.sources} />
           </AnalysisSection>
         ) : null}
-        {limitations.length > 0 ? (
-          <AnalysisSection title="Research limitations">
-            <Limitations items={limitations} />
-          </AnalysisSection>
-        ) : null}
         {actions}
         {message.meta ? <ResearchMetaDetails meta={message.meta} /> : null}
       </div>
     );
   }
-
-  const limitations = unique([
-    ...analysis.limitations,
-    ...(message.meta?.limitations ?? []),
-    ...(message.meta?.warnings ?? []),
-  ]);
 
   return (
     <div className="space-y-5">
@@ -224,12 +194,6 @@ export function AssistantMessage({
               </li>
             ))}
           </ol>
-        </AnalysisSection>
-      ) : null}
-
-      {limitations.length > 0 ? (
-        <AnalysisSection title="Research limitations">
-          <Limitations items={limitations} />
         </AnalysisSection>
       ) : null}
 

@@ -604,7 +604,6 @@ const { resolveDateRangeApp } = await import("@/lib/research/dateRange");
   
   if (estimateLine) {
     lines.push(estimateLine);
-    lines.push("*Google's own estimate, not an exact post count.*");
     lines.push("");
   }
   
@@ -620,10 +619,6 @@ const { resolveDateRangeApp } = await import("@/lib/research/dateRange");
     lines.push("");
   }
   
-  if (allPosts.length > 5) {
-    lines.push(`[Show more posts] — ${allPosts.length} total posts available`);
-  }
-
   const message = lines.join("\n").trim();
 
   const limitations = [
