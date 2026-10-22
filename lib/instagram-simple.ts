@@ -259,7 +259,7 @@ interface SearchResult {
 }
 
 async function searchInstagramPosts(
-  entity: string,
+  entities: string[],
   rangeFrom: string,
   rangeTo: string,
   config: ReturnType<typeof getResearchConfig>,
@@ -277,55 +277,58 @@ async function searchInstagramPosts(
   const afterText = adjustDateForTextOp(rangeFrom, -1);
   const beforeText = adjustDateForTextOp(rangeTo, 1);
 
-  const query = `site:instagram.com "${entity}" after:${afterText} before:${beforeText}`;
-
-  logger.info("Instagram simple query", { query, tbs, entity, rangeFrom, rangeTo });
-
   const provider = createSerpApiProvider({
     apiKey: serpApiKey,
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
   });
 
-  const firstPage = await provider.searchWithInfo?.(
-    {
-      query,
-      numResults: config.maxResultsPerQuery,
-      dateRange: { from: rangeFrom, to: rangeTo, label: "", timezone: "UTC", preset: null },
-      pages: 1,
-      newsOnly: false,
-    },
-    { signal }
-  );
-
-  if (!firstPage) {
-    throw new Error("Provider does not support searchWithInfo");
-  }
-
-  const rawOrganicResults = firstPage.rawOrganicResults;
-  const searchInformation = firstPage.searchInformation;
-
-  if (rawOrganicResults.length > 0) {
-    logger.debug("Raw organic result sample", { raw: rawOrganicResults[0] });
-  }
-
-  const posts: SimpleInstagramPost[] = [];
-  const seenShortcodes = new Set<string>();
+  const allPosts: SimpleInstagramPost[] = [];
+  let searchInformation: SerpApiSearchInformation | null = null;
   let rawFirstPageResult: SerpApiOrganicResult | null = null;
+  const seenShortcodes = new Set<string>();
 
-  for (const raw of rawOrganicResults) {
-    if (rawFirstPageResult === null && raw.link && raw.title) {
-      rawFirstPageResult = raw;
+  for (const entity of entities) {
+    const query = `site:instagram.com "${entity}" after:${afterText} before:${beforeText}`;
+
+    logger.info("Instagram simple query", { query, tbs, entity, rangeFrom, rangeTo });
+
+    const firstPage = await provider.searchWithInfo?.(
+      {
+        query,
+        numResults: config.maxResultsPerQuery,
+        dateRange: { from: rangeFrom, to: rangeTo, label: "", timezone: "UTC", preset: null },
+        pages: 1,
+        newsOnly: false,
+      },
+      { signal }
+    );
+
+    if (!firstPage) continue;
+
+    const rawOrganicResults = firstPage.rawOrganicResults;
+    if (!searchInformation) searchInformation = firstPage.searchInformation;
+
+    if (rawOrganicResults.length > 0) {
+      logger.debug("Raw organic result sample", { raw: rawOrganicResults[0] });
     }
-    const normalized = normalizePost(raw);
-    if (!normalized) continue;
-    const sc = shortcodeFromUrl(normalized.url);
-    if (sc && seenShortcodes.has(sc)) continue;
-    if (sc) seenShortcodes.add(sc);
-    posts.push(normalized);
+
+    for (const raw of rawOrganicResults) {
+      if (rawFirstPageResult === null && raw.link && raw.title) {
+        rawFirstPageResult = raw;
+      }
+      const normalized = normalizePost(raw);
+      if (!normalized) continue;
+      const sc = shortcodeFromUrl(normalized.url);
+      if (sc && seenShortcodes.has(sc)) continue;
+      if (sc) seenShortcodes.add(sc);
+      allPosts.push(normalized);
+    }
+
+    if (allPosts.length > 0) break;
   }
 
-  return { posts, searchInformation, rawFirstPageResult };
+  return { posts: allPosts, searchInformation, rawFirstPageResult };
 }
 
 async function fetchMorePosts(
@@ -607,7 +610,14 @@ export async function runSimpleInstagramResearch(
     rangeLabel = resolved.label;
   }
 
-  const searchResult = await searchInstagramPosts(entity, rangeFrom, rangeTo, config, signal);
+  // Try multiple entity variations: corrected name first, then original user query
+  const originalQuery = question.trim();
+  const entityVariations = [entity];
+  if (originalQuery.toLowerCase() !== entity.toLowerCase()) {
+    entityVariations.push(originalQuery);
+  }
+
+  const searchResult = await searchInstagramPosts(entityVariations, rangeFrom, rangeTo, config, signal);
   const { posts, searchInformation } = searchResult;
 
   let estimateLine: string | null = null;
