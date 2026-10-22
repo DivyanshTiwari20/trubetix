@@ -288,9 +288,15 @@ async function searchInstagramPosts(
   let rawFirstPageResult: SerpApiOrganicResult | null = null;
   const seenShortcodes = new Set<string>();
 
+  // Build query variations for each entity: exact, broad, very broad
+  const queryVariations: Array<{entity: string; query: string}> = [];
   for (const entity of entities) {
-    const query = `site:instagram.com "${entity}" after:${afterText} before:${beforeText}`;
+    queryVariations.push({ entity, query: `site:instagram.com "${entity}" after:${afterText} before:${beforeText}` });
+    queryVariations.push({ entity, query: `site:instagram.com ${entity} after:${afterText} before:${beforeText}` });
+    queryVariations.push({ entity, query: `${entity} instagram after:${afterText} before:${beforeText}` });
+  }
 
+  for (const { entity, query } of queryVariations) {
     logger.info("Instagram simple query", { query, tbs, entity, rangeFrom, rangeTo });
 
     const firstPage = await provider.searchWithInfo?.(
