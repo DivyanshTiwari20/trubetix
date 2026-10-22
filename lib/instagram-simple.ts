@@ -35,22 +35,24 @@ const EXTRACTION_SYSTEM_INSTRUCTION = `You are an entity extraction assistant fo
 
 Given the last 6 USER messages of a conversation, extract the primary entity (person, brand, hashtag, event) the user wants Instagram posts for.
 
-IGNORE these words - they are NEVER entities: tell, tll, me, total, number, numbr, post, posts, done, don, him, her, them, insta, instagram, last, days, give, show, reels, likes
+IGNORE these words - they are NEVER entities: tell, tll, me, total, number, numbr, post, posts, done, don, him, her, them, insta, instagram, last, days, give, show, reels, likes, good, bad, business, bussiness, image, fit, suitable, right, wrong, should, would, could
 
 A pronoun (him/her/them/his) means the entity from the previous USER message.
 
-Expand well-known abbreviations and nicknames to the full name ("srk" -> "Shah Rukh Khan"); if unsure, keep the text as the user wrote it.
+Extract ANY name that looks like a person, brand, or hashtag - even if misspelled, not famous, or you don't recognize it. Examples: "samain raina" → "samain raina", "srk" → "Shah Rukh Khan", "virat" → "Virat Kohli". If unsure, keep the text as the user wrote it.
 
 Corrections ("i am asking for srk not salman khan", "no, I meant X", "not him, X"): isCorrection = true, entity = X; re-run the previous user question (same intent, same range) with entity X.
 
-Return null for entity if there is no clear subject.
+Return null for entity ONLY if there is genuinely no name-like word in the message.
 
 Also identify the intent:
 - "count" = user wants a post count/number (how many posts, total posts, count)
-- "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz
+- "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz, image, reputation, or business fit
 - "show_more" = user explicitly wants more posts/results
 - "chat" = greeting, hi, thanks, bye, how are you, what can you do, small talk
-- "unclear" = no entity, vague, or ambiguous name
+- "unclear" = genuinely no entity-like word at all (e.g., "hello", "what can you do")
+
+Default to "narrative" if an entity is found but intent is ambiguous.
 
 Return ONLY valid JSON matching the schema.`;
 
@@ -577,11 +579,15 @@ export async function runSimpleInstagramResearch(
     };
   }
 
-  if (intent === "unclear" || !entity) {
+  if (!entity) {
     return {
       message: "Which person or brand should I look at?",
       meta: { ...emptyMeta, limitations: ["No entity identified"] }
     };
+  }
+
+  if (intent === "unclear") {
+    intent = "narrative";
   }
 
   let rangeFrom: string;
