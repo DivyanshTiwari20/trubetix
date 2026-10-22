@@ -618,7 +618,7 @@ function renderPostsTable(posts: SimpleInstagramPost[], startIndex: number = 0):
   const headers = ["#", "Title", "Account", "Caption", "Likes", "Comments", "Date"];
   const rows = posts.map((post, i) => [
     String(startIndex + i + 1),
-    `<a href="${post.url}" target="_blank" rel="noopener noreferrer" class="underline hover:text-primary">${truncateCaption(post.title, 60)}</a>`,
+    `[${truncateCaption(post.title, 60)}](${post.url})`,
     post.account === "unknown" ? "—" : `@${post.account}`,
     post.snippet ? truncateCaption(post.snippet, 140) : "—",
     post.likesText ?? "—",
@@ -626,20 +626,12 @@ function renderPostsTable(posts: SimpleInstagramPost[], startIndex: number = 0):
     formatDateDisplay(post),
   ]);
 
-  let table = "<div class=\"overflow-x-auto\"><table class=\"w-full text-sm border-collapse\">";
-  table += "<thead><tr class=\"border-b border-border\">";
-  for (const h of headers) {
-    table += `<th class="text-left p-2 font-medium text-muted-foreground">${h}</th>`;
-  }
-  table += "</tr></thead><tbody>";
+  // Generate markdown table
+  let table = "| " + headers.join(" | ") + " |\n";
+  table += "| " + headers.map(() => "---").join(" | ") + " |\n";
   for (const row of rows) {
-    table += "<tr class=\"border-b border-border/50\">";
-    for (const cell of row) {
-      table += `<td class="p-2">${cell}</td>`;
-    }
-    table += "</tr>";
+    table += "| " + row.join(" | ") + " |\n";
   }
-  table += "</tbody></table></div>";
   
   return table;
 }
@@ -851,7 +843,7 @@ export async function runSimpleInstagramResearch(
     }
 
     if (allPosts.length > 5) {
-      lines.push(`<button data-show-more="true" class="text-primary underline hover:text-primary mt-2 inline-block">Show all ${allPosts.length} posts</button>`);
+      lines.push(`[Show all ${allPosts.length} posts](#show-more)`);
     }
 
     lines.push("");
