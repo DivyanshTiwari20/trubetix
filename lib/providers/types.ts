@@ -38,6 +38,7 @@ export interface SearchProvider {
   searchWithInfo?: (query: ProviderQuery, options?: { signal?: AbortSignal }) => Promise<{
     results: RawProviderResult[];
     searchInformation: SerpApiSearchInformation | null;
+    searchMetadata: SerpApiSearchMetadata | null;
     rawOrganicResults: SerpApiOrganicResult[];
   }>;
 }
@@ -46,6 +47,19 @@ export interface SerpApiSearchInformation {
   total_results?: number | string;
   search_time?: number;
   query_displayed?: string;
+}
+
+export interface SerpApiSearchMetadata {
+  status?: string;
+  id?: string;
+  json_endpoint?: string;
+  created_at?: string;
+  processed_at?: string;
+  total_time_taken?: number;
+  google_domain?: string;
+  location?: string;
+  device?: string;
+  engine?: string;
 }
 
 export interface SerpApiOrganicResult {

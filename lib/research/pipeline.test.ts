@@ -46,6 +46,7 @@ function makeProvider(
       return {
         results,
         searchInformation: { total_results: results.length, query_displayed: query.query },
+        searchMetadata: { status: "Success" },
         rawOrganicResults: results.map((r) => ({
           title: r.title,
           link: r.url,

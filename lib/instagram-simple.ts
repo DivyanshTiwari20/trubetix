@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { GeminiClient } from "@/lib/ai/gemini";
 import { toGeminiSchema } from "@/lib/validation/gemini-schema";
 import { createSerpApiProvider } from "@/lib/providers/serpapi";
-import type { SerpApiOrganicResult, SerpApiSearchInformation } from "@/lib/providers/types";
+import type { SerpApiOrganicResult, SerpApiSearchInformation, SerpApiSearchMetadata } from "@/lib/providers/types";
 import { getSerpApiKey, getResearchConfig } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import type { ResearchMeta } from "@/types";
@@ -26,7 +26,7 @@ export interface SimpleInstagramPost {
 const entityExtractionSchema = z.object({
   entity: z.string().nullable(),
   isCorrection: z.boolean(),
-  intent: z.enum(["count", "narrative", "show_more", "chat", "unclear"]),
+  intent: z.enum(["count", "narrative", "show_more", "chat", "unclear", "business_fit"]),
 });
 
 export type EntityExtractionResult = z.infer<typeof entityExtractionSchema>;
@@ -47,7 +47,8 @@ Return null for entity ONLY if there is genuinely no name-like word in the messa
 
 Also identify the intent:
 - "count" = user wants a post count/number (how many posts, total posts, count)
-- "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz, image, reputation, or business fit
+- "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz, image, reputation
+- "business_fit" = user asks if person is good/suitable/fit for their business, brand fit, image for business
 - "show_more" = user explicitly wants more posts/results
 - "chat" = greeting, hi, thanks, bye, how are you, what can you do, small talk
 - "unclear" = genuinely no entity-like word at all (e.g., "hello", "what can you do")
@@ -255,13 +256,18 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
 interface SearchResult {
   posts: SimpleInstagramPost[];
   searchInformation: SerpApiSearchInformation | null;
+  searchMetadata: SerpApiSearchMetadata | null;
   rawFirstPageResult: SerpApiOrganicResult | null;
+  error: string | null;
+  rangeUsed: { from: string; to: string; label: string } | null;
+  queriesTried: string[];
 }
 
 async function searchInstagramPosts(
   entities: string[],
   rangeFrom: string,
   rangeTo: string,
+  rangeLabel: string,
   config: ReturnType<typeof getResearchConfig>,
   signal?: AbortSignal
 ): Promise<SearchResult> {
@@ -270,71 +276,184 @@ async function searchInstagramPosts(
     throw new Error("SERPAPI_API_KEY not configured");
   }
 
-  const tbsFrom = formatDateForTbs(rangeFrom);
-  const tbsTo = formatDateForTbs(rangeTo);
-  const tbs = `cdr:1,cd_min:${tbsFrom},cd_max:${tbsTo}`;
-
-  const afterText = adjustDateForTextOp(rangeFrom, -1);
-  const beforeText = adjustDateForTextOp(rangeTo, 1);
-
   const provider = createSerpApiProvider({
     apiKey: serpApiKey,
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
   });
 
-  const allPosts: SimpleInstagramPost[] = [];
-  let searchInformation: SerpApiSearchInformation | null = null;
-  let rawFirstPageResult: SerpApiOrganicResult | null = null;
-  const seenShortcodes = new Set<string>();
+  // Build date ranges to try: original, 7d, 30d, no date
+  const rangesToTry: Array<{ label: string; from: string; to: string; afterText: string; beforeText: string; tbs: string }> = [];
+  
+  // Original range
+  const tbsFrom = formatDateForTbs(rangeFrom);
+  const tbsTo = formatDateForTbs(rangeTo);
+  const originalTbs = `cdr:1,cd_min:${tbsFrom},cd_max:${tbsTo}`;
+  const originalAfter = adjustDateForTextOp(rangeFrom, -1);
+  const originalBefore = adjustDateForTextOp(rangeTo, 1);
+  rangesToTry.push({
+    label: rangeLabel,
+    from: rangeFrom,
+    to: rangeTo,
+    afterText: originalAfter,
+    beforeText: originalBefore,
+    tbs: originalTbs
+  });
 
-  // Build query variations for each entity: exact, broad, very broad
-  const queryVariations: Array<{entity: string; query: string}> = [];
-  for (const entity of entities) {
-    queryVariations.push({ entity, query: `site:instagram.com "${entity}" after:${afterText} before:${beforeText}` });
-    queryVariations.push({ entity, query: `site:instagram.com ${entity} after:${afterText} before:${beforeText}` });
-    queryVariations.push({ entity, query: `${entity} instagram after:${afterText} before:${beforeText}` });
+  // 7 days if original is shorter than 7 days
+  const originalDays = (new Date(rangeTo).getTime() - new Date(rangeFrom).getTime()) / (1000 * 60 * 60 * 24);
+  if (originalDays < 7) {
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const sevenDaysFrom = sevenDaysAgo.toISOString().split("T")[0];
+    const sevenDaysTo = now.toISOString().split("T")[0];
+    const tbs7From = formatDateForTbs(sevenDaysFrom);
+    const tbs7To = formatDateForTbs(sevenDaysTo);
+    const sevenTbs = `cdr:1,cd_min:${tbs7From},cd_max:${tbs7To}`;
+    const sevenAfter = adjustDateForTextOp(sevenDaysFrom, -1);
+    const sevenBefore = adjustDateForTextOp(sevenDaysTo, 1);
+    rangesToTry.push({
+      label: "Last 7 days",
+      from: sevenDaysFrom,
+      to: sevenDaysTo,
+      afterText: sevenAfter,
+      beforeText: sevenBefore,
+      tbs: sevenTbs
+    });
   }
 
-  for (const { entity, query } of queryVariations) {
-    logger.info("Instagram simple query", { query, tbs, entity, rangeFrom, rangeTo });
+  // 30 days
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const thirtyDaysFrom = thirtyDaysAgo.toISOString().split("T")[0];
+  const thirtyDaysTo = now.toISOString().split("T")[0];
+  const tbs30From = formatDateForTbs(thirtyDaysFrom);
+  const tbs30To = formatDateForTbs(thirtyDaysTo);
+  const thirtyTbs = `cdr:1,cd_min:${tbs30From},cd_max:${tbs30To}`;
+  const thirtyAfter = adjustDateForTextOp(thirtyDaysFrom, -1);
+  const thirtyBefore = adjustDateForTextOp(thirtyDaysTo, 1);
+  rangesToTry.push({
+    label: "Last 30 days",
+    from: thirtyDaysFrom,
+    to: thirtyDaysTo,
+    afterText: thirtyAfter,
+    beforeText: thirtyBefore,
+    tbs: thirtyTbs
+  });
 
-    const firstPage = await provider.searchWithInfo?.(
-      {
-        query,
-        numResults: config.maxResultsPerQuery,
-        dateRange: { from: rangeFrom, to: rangeTo, label: "", timezone: "UTC", preset: null },
-        pages: 1,
-        newsOnly: false,
-      },
-      { signal }
-    );
+  // No date restriction
+  rangesToTry.push({
+    label: "All time",
+    from: "",
+    to: "",
+    afterText: "",
+    beforeText: "",
+    tbs: ""
+  });
 
-    if (!firstPage) continue;
+  const allPosts: SimpleInstagramPost[] = [];
+  let searchInformation: SerpApiSearchInformation | null = null;
+  let searchMetadata: SerpApiSearchMetadata | null = null;
+  let rawFirstPageResult: SerpApiOrganicResult | null = null;
+  const seenShortcodes = new Set<string>();
+  const queriesTried: string[] = [];
+  let lastError: string | null = null;
+  let usedRange: { from: string; to: string; label: string } | null = null;
 
-    const rawOrganicResults = firstPage.rawOrganicResults;
-    if (!searchInformation) searchInformation = firstPage.searchInformation;
-
-    if (rawOrganicResults.length > 0) {
-      logger.debug("Raw organic result sample", { raw: rawOrganicResults[0] });
+  for (const range of rangesToTry) {
+    // Build query variations for each entity: exact, broad, very broad
+    const queryVariations: Array<{entity: string; query: string}> = [];
+    for (const entity of entities) {
+      if (range.tbs) {
+        queryVariations.push({ entity, query: `site:instagram.com "${entity}" after:${range.afterText} before:${range.beforeText}` });
+        queryVariations.push({ entity, query: `site:instagram.com ${entity} after:${range.afterText} before:${range.beforeText}` });
+        queryVariations.push({ entity, query: `${entity} instagram after:${range.afterText} before:${range.beforeText}` });
+      } else {
+        queryVariations.push({ entity, query: `site:instagram.com "${entity}"` });
+        queryVariations.push({ entity, query: `site:instagram.com ${entity}` });
+        queryVariations.push({ entity, query: `${entity} instagram` });
+      }
     }
 
-    for (const raw of rawOrganicResults) {
-      if (rawFirstPageResult === null && raw.link && raw.title) {
-        rawFirstPageResult = raw;
+    for (const { entity, query } of queryVariations) {
+      queriesTried.push(query);
+      
+      logger.info("Instagram simple query", { query, entity, rangeLabel: range.label });
+
+      const firstPage = await provider.searchWithInfo?.(
+        {
+          query,
+          numResults: config.maxResultsPerQuery,
+          dateRange: { from: range.from, to: range.to, label: range.label, timezone: "UTC", preset: null },
+          pages: 1,
+          newsOnly: false,
+        },
+        { signal }
+      );
+
+      if (!firstPage) {
+        lastError = "Provider does not support searchWithInfo";
+        continue;
       }
-      const normalized = normalizePost(raw);
-      if (!normalized) continue;
-      const sc = shortcodeFromUrl(normalized.url);
-      if (sc && seenShortcodes.has(sc)) continue;
-      if (sc) seenShortcodes.add(sc);
-      allPosts.push(normalized);
+
+      // Check for SerpAPI errors
+      const serpError = (firstPage as { error?: string }).error;
+      const serpStatus = firstPage.searchMetadata?.status;
+      
+      if (serpError && !isEmptyResultError(serpError)) {
+        lastError = `SerpAPI error: ${serpError}`;
+        logger.error("SerpAPI error", { error: serpError, status: serpStatus, entity, query });
+        continue;
+      }
+      
+      if (serpStatus && serpStatus !== "Success") {
+        lastError = `SerpAPI status: ${serpStatus}`;
+        logger.error("SerpAPI non-success status", { status: serpStatus, entity, query });
+        continue;
+      }
+
+      const rawOrganicResults = firstPage.rawOrganicResults;
+      if (!searchInformation) searchInformation = firstPage.searchInformation;
+      if (!searchMetadata) searchMetadata = firstPage.searchMetadata;
+
+      if (rawOrganicResults.length > 0) {
+        logger.debug("Raw organic result sample", { raw: rawOrganicResults[0] });
+      }
+
+      for (const raw of rawOrganicResults) {
+        if (rawFirstPageResult === null && raw.link && raw.title) {
+          rawFirstPageResult = raw;
+        }
+        const normalized = normalizePost(raw);
+        if (!normalized) continue;
+        const sc = shortcodeFromUrl(normalized.url);
+        if (sc && seenShortcodes.has(sc)) continue;
+        if (sc) seenShortcodes.add(sc);
+        allPosts.push(normalized);
+      }
+
+      if (allPosts.length > 0) {
+        usedRange = { from: range.from, to: range.to, label: range.label };
+        break;
+      }
     }
 
     if (allPosts.length > 0) break;
   }
 
-  return { posts: allPosts, searchInformation, rawFirstPageResult };
+  return { 
+    posts: allPosts, 
+    searchInformation, 
+    searchMetadata, 
+    rawFirstPageResult, 
+    error: lastError,
+    rangeUsed: usedRange,
+    queriesTried
+  };
+}
+
+function isEmptyResultError(message: string): boolean {
+  return /hasn'?t returned any results|did not match any documents|no results(?:\s+found)?|no search results/i.test(message.toLowerCase());
 }
 
 async function fetchMorePosts(
@@ -402,7 +521,7 @@ interface GeminiAnalysisInput {
     likes: string | null;
     snippet: string;
   }>;
-  intent: "count" | "narrative" | "show_more" | "other";
+  intent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` | "other";
   entity: string;
 }
 
@@ -418,11 +537,25 @@ async function analyzeWithGemini(
     `${i + 1}. ${p.title} | @${p.account} | ${p.date ?? "no date"} | ${p.likes ?? "no likes"} | ${p.snippet}`
   ).join("\n");
 
-  const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian English, short sentences, warm but direct, no corporate words, no emoji in results (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Use only the posts you are given; attribute claims ('according to posts by ...') and say 'reported' for allegations. Never write post counts, likes totals or estimate numbers yourself; the app shows those. If you do not understand, ask one short question. If the posts do not cover the question, say so in one line.
+  let systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian English, short sentences, warm but direct, no corporate words, no emoji in results (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Use only the posts you are given; attribute claims ('according to posts by ...') and say 'reported' for allegations. Never write post counts, likes totals or estimate numbers yourself; the app shows those. If you do not understand, ask one short question. If the posts do not cover the question, say so in one line.`;
 
-${input.intent === "count" ? `Write EXACTLY ONE sentence summarizing the key themes or activity. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.` : 
-  input.intent === "narrative" ? `Write a short answer (max 8 sentences). Themes as short bullets. Attribute claims. Use "reported" for allegations. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.` :
-  `Provide a brief answer about Instagram posts for "${input.entity}". Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`}`;
+  if (input.intent === "count") {
+    systemInstruction += `\n\nWrite EXACTLY ONE sentence summarizing the key themes or activity. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+  } else if (input.intent.startsWith("business_fit")) {
+    const businessType = input.intent.split(":")[1] || "business";
+    systemInstruction += `\n\nThe user asks if "${input.entity}" is a good fit for their ${businessType} business. Write 5 to 7 short sentences using ONLY the supplied posts:
+- What the person is mostly known for in these posts
+- The tone of the conversation
+- Any reported controversies (attribute with "reported")
+- How this could fit or clash with a ${businessType} business
+State in one line: "This assessment is based on Instagram posts only."
+End with ONE short follow-up question (e.g., about their target audience).
+Never state allegations as facts. Never invent facts not in the posts.`;
+  } else if (input.intent === "narrative") {
+    systemInstruction += `\n\nWrite a short answer (max 8 sentences). Themes as short bullets. Attribute claims. Use "reported" for allegations. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+  } else {
+    systemInstruction += `\n\nProvide a brief answer about Instagram posts for "${input.entity}". Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+  }
 
   const prompt = `Instagram posts for "${input.entity}" (up to 30 posts):\n${postsText}`;
 
@@ -567,7 +700,7 @@ export async function runSimpleInstagramResearch(
   }
 
   let entity: string | null = null;
-  let intent: "count" | "narrative" | "show_more" | "chat" | "unclear" = "narrative";
+  let intent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` = "narrative";
   try {
     const extraction = await extractEntityWithGemini(history, gemini);
     entity = extraction.entity;
@@ -623,8 +756,20 @@ export async function runSimpleInstagramResearch(
     entityVariations.push(originalQuery);
   }
 
-  const searchResult = await searchInstagramPosts(entityVariations, rangeFrom, rangeTo, config, signal);
-  const { posts, searchInformation } = searchResult;
+  const searchResult = await searchInstagramPosts(entityVariations, rangeFrom, rangeTo, rangeLabel, config, signal);
+  const { posts, searchInformation, error, rangeUsed, queriesTried } = searchResult;
+
+  // Handle SerpAPI errors
+  if (error) {
+    logger.error("Instagram search failed", { error, entity, queries: queriesTried });
+    return {
+      message: "I couldn't reach Google search just now. Please try again in a minute.",
+      meta: { ...emptyMeta, limitations: [error] }
+    };
+  }
+
+  // Use the range that actually returned posts
+  const actualRangeLabel = rangeUsed?.label ?? rangeLabel;
 
   let estimateLine: string | null = null;
   if (searchInformation?.total_results) {
@@ -632,7 +777,7 @@ export async function runSimpleInstagramResearch(
       ? parseInt(searchInformation.total_results, 10)
       : searchInformation.total_results;
     if (Number.isFinite(total)) {
-      estimateLine = `About ${formatNumberWithSeparators(total)} results on Google for ${entity} on Instagram, ${rangeLabel}.`;
+      estimateLine = `About ${formatNumberWithSeparators(total)} results on Google for ${entity} on Instagram, ${actualRangeLabel}.`;
     }
   }
 
@@ -647,6 +792,12 @@ export async function runSimpleInstagramResearch(
   }
   
   lines.push(`Showing results for ${entity}`);
+  
+  // Add widening note if range was widened
+  if (rangeUsed && rangeUsed.label !== rangeLabel) {
+    lines.push(`Nothing found for ${rangeLabel}, so this shows ${rangeUsed.label}.`);
+  }
+  
   lines.push("");
 
   if (intent === "show_more" || question.toLowerCase().includes("show more") || question.toLowerCase().includes("more posts")) {
@@ -668,7 +819,17 @@ export async function runSimpleInstagramResearch(
         likes: p.likesText,
         snippet: p.snippet,
       }));
-      geminiAnswer = await analyzeWithGemini({ posts: postsForGemini, intent: intent === "count" ? "count" : "narrative", entity }, gemini);
+      
+      // Determine analysis intent - use template literal for business_fit to pass business type
+      let analysisIntent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` = intent;
+      if (intent === "business_fit") {
+        // Extract business type from question
+        const businessMatch = question.match(/(?:for my|for our|for the)\s+([a-z\s]+?)(?:\s|$|\?)/i);
+        const businessType = businessMatch ? businessMatch[1].trim() : "business";
+        analysisIntent = `business_fit:${businessType}`;
+      }
+      
+      geminiAnswer = await analyzeWithGemini({ posts: postsForGemini, intent: analysisIntent, entity }, gemini);
     } catch (error) {
       logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
     }
@@ -694,11 +855,15 @@ export async function runSimpleInstagramResearch(
     }
 
     lines.push("");
-    lines.push("Want more posts, another person, or a different date range?");
+    
+    // Different follow-up questions based on intent
+    if (intent === "business_fit") {
+      lines.push("Want me to check another person or look at a different date range?");
+    } else {
+      lines.push("Want more posts, another person, or a different date range?");
+    }
   } else {
-    lines.push(`No Instagram posts found for ${entity} in ${rangeLabel}.`);
-    lines.push("");
-    lines.push("Try a different name, date range, or check spelling?");
+    lines.push(`I couldn't find Instagram posts for ${entity}. Could you check the spelling or give me the Instagram handle?`);
   }
 
   const message = lines.join("\n").trim();

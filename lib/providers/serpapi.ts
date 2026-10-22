@@ -32,10 +32,24 @@ interface SerpApiSearchInformation {
   query_displayed?: string;
 }
 
+interface SerpApiSearchMetadata {
+  status?: string;
+  id?: string;
+  json_endpoint?: string;
+  created_at?: string;
+  processed_at?: string;
+  total_time_taken?: number;
+  google_domain?: string;
+  location?: string;
+  device?: string;
+  engine?: string;
+}
+
 interface SerpApiResponse {
   organic_results?: SerpApiOrganicResult[];
   news_results?: SerpApiNewsResult[];
   search_information?: SerpApiSearchInformation;
+  search_metadata?: SerpApiSearchMetadata;
   error?: string;
 }
 
@@ -104,6 +118,7 @@ function parseNews(data: SerpApiResponse): RawProviderResult[] {
 export interface SerpApiSearchResult {
   results: RawProviderResult[];
   searchInformation: SerpApiSearchInformation | null;
+  searchMetadata: SerpApiSearchMetadata | null;
   rawOrganicResults: SerpApiOrganicResult[];
 }
 
@@ -145,6 +160,7 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): SearchPr
 
       const results: RawProviderResult[] = [];
       let searchInformation: SerpApiSearchInformation | null = null;
+      let searchMetadata: SerpApiSearchMetadata | null = null;
       const rawOrganicResults: SerpApiOrganicResult[] = [];
 
       for (let page = 1; page <= maxPages; page += 1) {
@@ -166,9 +182,14 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): SearchPr
           break;
         }
 
-        // Capture search_information from first page only
-        if (page === 1 && data.search_information) {
-          searchInformation = data.search_information;
+        // Capture search_information and search_metadata from first page only
+        if (page === 1) {
+          if (data.search_information) {
+            searchInformation = data.search_information;
+          }
+          if (data.search_metadata) {
+            searchMetadata = data.search_metadata;
+          }
         }
 
         const pageResults = query.newsOnly ? parseNews(data) : parseOrganic(data);
@@ -185,7 +206,7 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): SearchPr
         if (query.newsOnly && pageResults.length === 0) break;
       }
 
-      return { results, searchInformation, rawOrganicResults };
+      return { results, searchInformation, searchMetadata, rawOrganicResults };
     },
   };
 
