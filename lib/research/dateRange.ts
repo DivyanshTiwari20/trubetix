@@ -10,36 +10,67 @@ export interface ResolvedDateRangeApp {
   preset: string | null;
 }
 
-function endOfDayInTz(date: Date, tz: string): Date {
-  const copy = new Date(date);
+interface CalendarDateParts {
+  year: number;
+  month: number;
+  day: number;
+}
+
+function calendarDateParts(date: Date, tz: string): CalendarDateParts {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(copy);
-  const year = Number(parts.find((p) => p.type === "year")?.value);
-  const month = Number(parts.find((p) => p.type === "month")?.value) - 1;
-  const day = Number(parts.find((p) => p.type === "day")?.value);
-  copy.setUTCFullYear(year, month, day);
-  copy.setUTCHours(23, 59, 59, 999);
-  return copy;
+  }).formatToParts(date);
+  const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return { year: value("year"), month: value("month"), day: value("day") };
+}
+
+function localMidnightInTz(dateParts: CalendarDateParts, tz: string): Date {
+  const desiredWallTime = Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day);
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  let candidate = desiredWallTime;
+
+  // Convert the requested wall-clock midnight to its actual UTC instant.
+  // Iteration accounts for the timezone offset without assuming a fixed offset.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = formatter.formatToParts(new Date(candidate));
+    const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+    const representedWallTime = Date.UTC(
+      value("year"),
+      value("month") - 1,
+      value("day"),
+      value("hour"),
+      value("minute"),
+      value("second"),
+    );
+    const adjustment = desiredWallTime - representedWallTime;
+    if (adjustment === 0) return new Date(candidate);
+    candidate += adjustment;
+  }
+
+  return new Date(candidate);
+}
+
+function endOfDayInTz(date: Date, tz: string): Date {
+  const localDate = calendarDateParts(date, tz);
+  const nextDay = new Date(Date.UTC(localDate.year, localDate.month - 1, localDate.day + 1));
+  const nextLocalMidnight = localMidnightInTz(calendarDateParts(nextDay, "UTC"), tz);
+  return new Date(nextLocalMidnight.getTime() - 1);
 }
 
 function startOfDayInTz(date: Date, tz: string): Date {
-  const copy = new Date(date);
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(copy);
-  const year = Number(parts.find((p) => p.type === "year")?.value);
-  const month = Number(parts.find((p) => p.type === "month")?.value) - 1;
-  const day = Number(parts.find((p) => p.type === "day")?.value);
-  copy.setUTCFullYear(year, month, day);
-  copy.setUTCHours(0, 0, 0, 0);
-  return copy;
+  return localMidnightInTz(calendarDateParts(date, tz), tz);
 }
 
 function parseBoundary(value: string | undefined): Date | null {
@@ -111,8 +142,8 @@ export function resolveDateRangeApp(
 
 export function toSerpApiTbsApp(range: ResolvedDateRangeApp): string {
   const format = (iso: string) => {
-    const date = new Date(iso);
-    return `${date.getUTCMonth() + 1}/${date.getUTCDate()}/${date.getUTCFullYear()}`;
+    const { year, month, day } = calendarDateParts(new Date(iso), range.timezone);
+    return `${month}/${day}/${year}`;
   };
   const min = format(range.from);
   const max = format(range.to);

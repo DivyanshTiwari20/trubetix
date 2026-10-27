@@ -24,6 +24,14 @@ interface SerpApiOrganicResult {
   };
   displayed_link?: string;
   extensions?: string[];
+  caption?: string;
+  caption_text?: string;
+  hashtags?: string[];
+  owner?: string | { username?: string };
+  username?: string;
+  likes?: string | number;
+  comments?: string | number;
+  [key: string]: unknown;
 }
 
 interface SerpApiSearchInformation {
@@ -68,8 +76,6 @@ function pickNewsSource(source: SerpApiNewsResult["source"]): string | null {
   if (typeof source === "string") return source;
   return source.name ?? null;
 }
-
-const PAGE_HARD_CAP = 10;
 
 /**
  * SerpAPI signals "the query is valid but Google has no results" as an error
@@ -120,9 +126,15 @@ export interface SerpApiSearchResult {
   searchInformation: SerpApiSearchInformation | null;
   searchMetadata: SerpApiSearchMetadata | null;
   rawOrganicResults: SerpApiOrganicResult[];
+  /** Actual first-page request parameters, excluding the secret API key. */
+  requestParameters: Record<string, string>;
+  pagesFetched: number;
+  pagesRequested: number | null;
+  pageLimitReached: boolean;
+  paginationError: string | null;
 }
 
-export function createSerpApiProvider(options: SerpApiProviderOptions): SearchProvider & {
+export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<SearchProvider, "searchWithInfo"> & {
   searchWithInfo(query: ProviderQuery, options?: { signal?: AbortSignal }): Promise<SerpApiSearchResult>;
 } {
   const provider = {
@@ -135,11 +147,10 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): SearchPr
       return result.results;
     },
     async searchWithInfo(query: ProviderQuery, opts: { signal?: AbortSignal } = {}) {
-      const buildUrl = (start: number) => {
+      const buildParams = (start: number) => {
         const params = new URLSearchParams({
           engine: "google",
           q: query.query,
-          api_key: options.apiKey,
           num: String(query.numResults),
           hl: "en",
           gl: "us",
@@ -148,36 +159,54 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): SearchPr
           start: String(start),
         });
         if (query.newsOnly) params.set("tbm", "nws");
-
-        return `https://serpapi.com/search.json?${params.toString()}`;
+        return params;
       };
 
       // Pagination is for organic discovery (site-scoped social listening).
       // News stays on one page because the news cap is applied upstream.
       const maxPages = query.newsOnly
         ? 1
-        : Math.max(1, Math.min(query.pages ?? 1, PAGE_HARD_CAP));
+        : query.fetchAllPages
+          ? Number.POSITIVE_INFINITY
+          : Math.max(1, query.pages ?? 1);
 
       const results: RawProviderResult[] = [];
       let searchInformation: SerpApiSearchInformation | null = null;
       let searchMetadata: SerpApiSearchMetadata | null = null;
       const rawOrganicResults: SerpApiOrganicResult[] = [];
+      let pagesFetched = 0;
+      let requestParameters: Record<string, string> = {};
+      let lastPageResultCount = 0;
+      let paginationError: string | null = null;
+      const seenPageLinks = new Set<string>();
 
       for (let page = 1; page <= maxPages; page += 1) {
-        const data = await fetchJson<SerpApiResponse>(
-          buildUrl((page - 1) * query.numResults),
-          {},
-          {
-            timeoutMs: options.timeoutMs,
-            retries: options.maxRetries,
-            signal: opts.signal,
-            fetchImpl: options.fetchImpl,
-          },
-        );
+        let data: SerpApiResponse;
+        const pageParameters = buildParams((page - 1) * query.numResults);
+        if (page === 1) requestParameters = Object.fromEntries(pageParameters.entries());
+        pageParameters.set("api_key", options.apiKey);
+        try {
+          data = await fetchJson<SerpApiResponse>(
+            `https://serpapi.com/search.json?${pageParameters.toString()}`,
+            {},
+            {
+              timeoutMs: options.timeoutMs,
+              retries: options.maxRetries,
+              signal: opts.signal,
+              fetchImpl: options.fetchImpl,
+            },
+          );
+        } catch (error) {
+          if (page === 1) throw error;
+          paginationError = error instanceof Error ? error.message : String(error);
+          break;
+        }
+        pagesFetched = page;
 
         if (data.error) {
           if (isEmptyResultError(data.error)) break;
           if (page === 1) throw new Error(`SerpAPI reported an error: ${data.error}`);
+          paginationError = data.error;
           // Later pages failing must not lose the pages already collected.
           break;
         }
@@ -195,18 +224,32 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): SearchPr
         const pageResults = query.newsOnly ? parseNews(data) : parseOrganic(data);
         results.push(...pageResults);
 
-        if (!query.newsOnly && data.organic_results) {
-          rawOrganicResults.push(...data.organic_results);
+        const rawPageResults = data.organic_results ?? [];
+        if (!query.newsOnly) {
+          rawOrganicResults.push(...rawPageResults);
+          lastPageResultCount = rawPageResults.length;
+          const newLinks = rawPageResults.reduce((count, item) => {
+            if (!item.link || seenPageLinks.has(item.link)) return count;
+            seenPageLinks.add(item.link);
+            return count + 1;
+          }, 0);
+          // A short or non-progressing page means the provider has exhausted this query.
+          if (rawPageResults.length < query.numResults || newLinks === 0) break;
         }
-
-        // Stop only when a page returns 0 organic results (result set exhausted).
-        // Use raw organic_results, not filtered pageResults, to avoid stopping
-        // early when some results lack link/title.
-        if (!query.newsOnly && data.organic_results && data.organic_results.length === 0) break;
         if (query.newsOnly && pageResults.length === 0) break;
       }
 
-      return { results, searchInformation, searchMetadata, rawOrganicResults };
+      return {
+        results,
+        searchInformation,
+        searchMetadata,
+        rawOrganicResults,
+        requestParameters,
+        pagesFetched,
+        pagesRequested: Number.isFinite(maxPages) ? maxPages : null,
+        pageLimitReached: !query.newsOnly && Number.isFinite(maxPages) && pagesFetched === maxPages && lastPageResultCount >= query.numResults,
+        paginationError,
+      };
     },
   };
 

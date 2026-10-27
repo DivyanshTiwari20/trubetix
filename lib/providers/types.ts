@@ -11,6 +11,8 @@ export interface ProviderQuery {
    * ceiling on pagination spend rather than a guaranteed request count.
    */
   pages?: number;
+  /** Fetch until the provider exhausts this query instead of using a page-count ceiling. */
+  fetchAllPages?: boolean;
 }
 
 export interface RawProviderResult {
@@ -40,6 +42,7 @@ export interface SearchProvider {
     searchInformation: SerpApiSearchInformation | null;
     searchMetadata: SerpApiSearchMetadata | null;
     rawOrganicResults: SerpApiOrganicResult[];
+    requestParameters?: Record<string, string>;
   }>;
 }
 
@@ -75,6 +78,14 @@ export interface SerpApiOrganicResult {
   };
   displayed_link?: string;
   extensions?: string[];
+  caption?: string;
+  caption_text?: string;
+  hashtags?: string[];
+  owner?: string | { username?: string };
+  username?: string;
+  likes?: string | number;
+  comments?: string | number;
+  [key: string]: unknown;
 }
 
 export interface InstagramPost {

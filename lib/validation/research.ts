@@ -82,6 +82,39 @@ export const researchIntentKindSchema = z.enum([
   "general",
 ]);
 
+export const instagramPostViewSchema = z.object({
+  title: z.string(),
+  url: z.string(),
+  caption: z.string().nullable(),
+  snippet: z.string(),
+  hashtags: z.array(z.string()),
+  snippetHashtags: z.array(z.string()),
+  account: z.string(),
+  likes: z.string().nullable(),
+  comments: z.string().nullable(),
+  postedDate: z.string().nullable(),
+});
+
+export const instagramResultsViewSchema = z.object({
+  entity: z.string(),
+  dateRangeLabel: z.string(),
+  googleEstimatedResults: z.string().nullable(),
+  estimateQuery: z.string().nullable(),
+  estimateDateRange: dateRangeSchema.nullable().optional(),
+  estimateDateFilter: z.string().nullable().optional(),
+  estimateNumResults: z.number().int().nullable().optional(),
+  estimateProviderTotalResults: z.union([z.number(), z.string()]).nullable().optional(),
+  estimateProvenance: z.object({
+    query: z.string(),
+    queryDisplayed: z.string().nullable(),
+    parameters: z.record(z.string(), z.string()),
+    totalResults: z.union([z.number(), z.string()]).nullable(),
+  }).nullable().optional(),
+  estimateError: z.string().nullable().optional(),
+  isCountRequest: z.boolean(),
+  posts: z.array(instagramPostViewSchema),
+});
+
 export const researchMetaSchema = z.object({
   status: z.enum(["ok", "degraded", "failed"]),
   question: z.string(),
@@ -101,4 +134,5 @@ export const researchMetaSchema = z.object({
   limitations: z.array(z.string()),
   warnings: z.array(z.string()),
   generatedAt: z.string(),
+  instagramResults: instagramResultsViewSchema.optional(),
 });

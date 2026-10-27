@@ -43,6 +43,38 @@ const providerOptions = {
 };
 
 describe("createSerpApiProvider pagination", () => {
+  it("retains the estimate total with its sanitized first-page parameters", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      text: async () => JSON.stringify({
+        search_information: { total_results: 34, query_displayed: "site:instagram.com Salman Khan" },
+        organic_results: [],
+      }),
+    })) as unknown as typeof fetch;
+    const provider = createSerpApiProvider({ ...providerOptions, fetchImpl });
+
+    const response = await provider.searchWithInfo({
+      query: "site:instagram.com Salman Khan",
+      numResults: 10,
+      dateRange,
+      fetchAllPages: false,
+      newsOnly: false,
+    });
+
+    expect(response.searchInformation?.total_results).toBe(34);
+    expect(response.requestParameters).toEqual({
+      engine: "google",
+      q: "site:instagram.com Salman Khan",
+      num: "10",
+      hl: "en",
+      gl: "us",
+      google_domain: "google.com",
+      tbs: "cdr:1,cd_min:5/1/2026,cd_max:5/8/2026",
+      start: "0",
+    });
+    expect(response.requestParameters).not.toHaveProperty("api_key");
+  });
+
   it("fetches the requested page count with start offsets", async () => {
     const fetch = makeFetch([{ count: 10 }, { count: 10 }, { count: 4 }]);
     const provider = createSerpApiProvider({ ...providerOptions, fetchImpl: fetch.fetchImpl });

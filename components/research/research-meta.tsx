@@ -27,7 +27,9 @@ export function ResearchMetaDetails({ meta }: { meta: ResearchMeta }) {
   return (
     <details className="group rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
       <summary className="cursor-pointer list-none font-medium text-muted-foreground marker:hidden">
-        Research details ({meta.resultsIncluded} sources, {meta.queries.length} queries)
+        {meta.instagramResults
+          ? `Instagram results for ${meta.instagramResults.entity}`
+          : `Research details (${meta.resultsIncluded} sources, ${meta.queries.length} queries)`}
       </summary>
       <ResearchMetaBody meta={meta} />
     </details>
@@ -35,6 +37,24 @@ export function ResearchMetaDetails({ meta }: { meta: ResearchMeta }) {
 }
 
 export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
+  if (meta.instagramResults) {
+    const results = meta.instagramResults;
+    return (
+      <div className="mt-2 space-y-2">
+        <p className="font-medium">Instagram search</p>
+        <dl>
+          <Row label="Entity" value={results.entity} />
+          <Row label="Date range" value={results.dateRangeLabel} />
+          <Row label="Google estimated results" value={results.googleEstimatedResults ?? "Unavailable"} />
+          <Row label="Posts shown" value={results.posts.length.toLocaleString("en-US")} />
+        </dl>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Google's estimate is approximate, not an Instagram-wide post count.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="mt-2 space-y-2">
       <dl>
@@ -123,7 +143,9 @@ export function ResearchPanel({ meta }: { meta: ResearchMeta | null }) {
     <div className="space-y-3 p-3 text-xs">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold">Research context</h2>
-        {meta ? <Badge variant={STATUS_VARIANT[meta.status]}>{meta.status}</Badge> : null}
+        {meta && !meta.instagramResults ? (
+          <Badge variant={STATUS_VARIANT[meta.status]}>{meta.status}</Badge>
+        ) : null}
       </div>
       {!meta ? (
         <p className="text-muted-foreground">

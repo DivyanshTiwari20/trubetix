@@ -2,17 +2,21 @@ import "server-only";
 import { z } from "zod";
 import type { GeminiClient } from "@/lib/ai/gemini";
 import { toGeminiSchema } from "@/lib/validation/gemini-schema";
-import { createSerpApiProvider } from "@/lib/providers/serpapi";
-import type { SerpApiOrganicResult, SerpApiSearchInformation, SerpApiSearchMetadata } from "@/lib/providers/types";
+import { createSerpApiProvider, type SerpApiSearchResult } from "@/lib/providers/serpapi";
+import type { SerpApiOrganicResult } from "@/lib/providers/types";
 import { getSerpApiKey, getResearchConfig } from "@/lib/env";
+import { APP_TZ } from "@/lib/config";
 import { logger } from "@/lib/logger";
 import type { ResearchMeta } from "@/types";
 import { shortcodeFromUrl, dateFromShortcode } from "@/lib/research/igDate";
+import { resolveDateRangeApp, toSerpApiTbsApp } from "@/lib/research/dateRange";
+import type { ResolvedDateRangeApp } from "@/lib/research/dateRange";
 
 export interface SimpleInstagramPost {
   url: string;
   title: string;
   account: string;
+  accountSource: "provider" | "search-result text" | null;
   dateISO: string | null;
   dateText: string | null;
   googleRelativeTime: string | null;
@@ -20,7 +24,12 @@ export interface SimpleInstagramPost {
   likesNum: number | null;
   commentsText: string | null;
   commentsNum: number | null;
+  caption: string | null;
+  hashtags: string[];
+  snippetHashtags: string[];
   snippet: string;
+  dateSource: "provider" | "shortcode" | null;
+  providerMetadata: Record<string, unknown>;
 }
 
 const entityExtractionSchema = z.object({
@@ -33,7 +42,7 @@ export type EntityExtractionResult = z.infer<typeof entityExtractionSchema>;
 
 const EXTRACTION_SYSTEM_INSTRUCTION = `You are an entity extraction assistant for an Instagram research tool.
 
-Given the last 6 USER messages of a conversation, extract the primary entity (person, brand, hashtag, event) the user wants Instagram posts for.
+Extract the primary entity and intent for the CURRENT Instagram request. The current user message is authoritative; use prior user messages only to resolve a clear follow-up that has no entity of its own. Never let an older entity override a name or brand explicitly present in the current message.
 
 IGNORE these filler words - they are NEVER entities: tell, tll, me, about, give, show, what, how, many, posts, number, reaction, people, saying, on, insta, instagram, in, last, days, good, bad, business, bussiness, image, fit, suitable, right, wrong, should, would, could, the, a, an, and, or, but, if, then, than, that, this, these, those, there, their, them, they, it, its, of, to, for, with, from, by, into, over, under, again, further, once, here, all, any, some, no, not, only, own, same, so, too, very, just, please, find, analyze, analyse, identify, summarize, summarise, explain, describe, report, around, regarding, concerning, our, my, we, i, us, you, your, client, clients, latest, recent, new, major, most, past, next, week, weeks, month, months, day, year, years, today, yesterday, media, conversation, narratives, narrative, risks, risk, changes, change, developments, happening, buzzing, buzz, happened, cover, coverage, story, stories, outlet, outlets, press, publication, publications, competitor, competitors, reputational, reputation, potential, team, investigate, recommend, actions, action, things, thing, much, more, less, anyone, someone, anything, everything, something, ig, tiktok, twitter, facebook, youtube, linkedin, reddit, threads, social, reel, reels, viral, trending, trend, sentiment, reactions, reacting, respond, responding, response, comments, comment, engagement, followers, follower, following, profile, profiles, account, accounts, bio, opinions, opinion, numbers, metric, metrics, statistics, statistic, stats, stat, figures, figure, count, counts, data, insights, insight, performance, reach, impressions, views, likes, shares, growth, overall, film, movie, series, show, person
 
@@ -59,12 +68,33 @@ Return ONLY valid JSON matching the schema.`;
 
 const entityExtractionGeminiSchema = toGeminiSchema(entityExtractionSchema);
 
+function extractExplicitEntity(question: string): string | null {
+  const matches = [...question.matchAll(/\b(?:about|regarding|concerning|for|on|from|by|of)\s+([#@]?[\p{L}\p{N}][\p{L}\p{N}._'’-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}._'’-]*){0,5})/giu)];
+  const platformWords = new Set(["instagram", "insta", "ig", "facebook", "youtube", "tiktok", "twitter", "reddit", "linkedin", "threads"]);
+  const stop = /\b(?:about|regarding|concerning|the|a|an|of|in|during|within|over|last|past|this|today|yesterday|between|after|before|week|month|year|day|hours?|posts?|content|mentions?|videos?|reels?|stories|hashtags?|count|number|total|on instagram|on insta|on ig|on x|for the last)\b/i;
+
+  for (const match of matches) {
+    const candidate = (match[1] ?? "").split(stop)[0].trim().replace(/[.,!?;:]+$/, "");
+    const normalized = candidate.replace(/^[@#]/, "").trim().replace(/['’]s$/i, "");
+    if (!normalized || platformWords.has(normalized.toLowerCase())) continue;
+    if (/^(?:last|past|this)\s+(?:week|month|year|day)$/i.test(normalized)) continue;
+    return /^srk$/i.test(normalized) ? "Shah Rukh Khan" : normalized;
+  }
+  return null;
+}
+
+function sameEntityText(left: string, right: string): boolean {
+  const normalize = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  return normalize(left) === normalize(right);
+}
+
 async function extractEntityWithGemini(
+  question: string,
   userHistory: string[],
   gemini: GeminiClient
 ): Promise<EntityExtractionResult> {
-  const lastSixUser = userHistory.slice(-6);
-  const prompt = `Last 6 user messages:\n${lastSixUser.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
+  const priorMessages = userHistory.filter((message) => message.trim() !== question.trim()).slice(-6);
+  const prompt = `Current user message (use this first):\n${question}\n\nPrior user messages for follow-up context only:\n${priorMessages.map((m, i) => `${i + 1}. ${m}`).join("\n") || "(none)"}`;
 
   const response = await gemini.generateStructured({
     systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
@@ -78,25 +108,16 @@ async function extractEntityWithGemini(
     throw new Error(`Gemini entity extraction returned invalid JSON: ${parsed.error.message}`);
   }
 
-  return parsed.data;
-}
-
-function formatNumberWithSeparators(num: number | string): string {
-  const n = typeof num === "string" ? parseInt(num, 10) : num;
-  if (!Number.isFinite(n)) return String(num);
-  return n.toLocaleString("en-US");
-}
-
-function formatDateForTbs(dateStr: string): string {
-  const date = new Date(dateStr);
-  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(date.getUTCDate()).padStart(2, "0");
-  const year = date.getUTCFullYear();
-  return `${month}/${day}/${year}`;
+  const explicitEntity = extractExplicitEntity(question);
+  const modelEntity = parsed.data.entity;
+  const entity = explicitEntity
+    ? (modelEntity && sameEntityText(modelEntity, explicitEntity) ? modelEntity : explicitEntity)
+    : modelEntity;
+  return { ...parsed.data, entity };
 }
 
 function adjustDateForTextOp(dateStr: string, days: number): string {
-  const date = new Date(dateStr);
+  const date = new Date(dateAtUtcNoonForLocalDay(dateStr, APP_TZ));
   date.setUTCDate(date.getUTCDate() + days);
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
@@ -104,24 +125,190 @@ function adjustDateForTextOp(dateStr: string, days: number): string {
   return `${year}-${month}-${day}`;
 }
 
-function parseLikesNum(text: string): number | null {
-  const m = text.match(/([\d.,]+)\s*([KM]?)\+?\s*likes?/i);
-  if (!m) return null;
-  const num = parseFloat(m[1].replace(/,/g, ""));
-  const mult = m[2]?.toUpperCase();
-  if (mult === "K") return Math.round(num * 1_000);
-  if (mult === "M") return Math.round(num * 1_000_000);
-  return Math.round(num);
+function explicitDateRange(question: string, now: Date) {
+  const text = question.toLowerCase();
+  if (/\b(?:last|past)\s+24\s+hours?\b/.test(text)) return resolveDateRangeApp({ preset: "24h" }, now);
+  if (/\b(?:last|past)\s+week\b/.test(text)) return resolveDateRangeApp({ preset: "7d" }, now);
+  if (/\b(?:last|past)\s+month\b/.test(text)) return resolveDateRangeApp({ preset: "30d" }, now);
+
+  const numberWords: Record<string, number> = {
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+    eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  };
+  const match = text.match(/\b(?:last|past|over the last|within the last)\s+(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+days?\b/);
+  if (match) {
+    const days = Number(match[1]) || numberWords[match[1]];
+    const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+    return resolveDateRangeApp({ preset: "custom", from, to: now.toISOString() }, now);
+  }
+  if (/\b(?:last|past)\s+year\b/.test(text)) {
+    const from = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    return resolveDateRangeApp({ preset: "custom", from, to: now.toISOString() }, now);
+  }
+  return null;
 }
 
-function parseCommentsNum(text: string): number | null {
-  const m = text.match(/([\d.,]+)\s*([KM]?)\+?\s*comments?/i);
-  if (!m) return null;
-  const num = parseFloat(m[1].replace(/,/g, ""));
-  const mult = m[2]?.toUpperCase();
-  if (mult === "K") return Math.round(num * 1_000);
-  if (mult === "M") return Math.round(num * 1_000_000);
-  return Math.round(num);
+function normalizeDatePreset(preset: string | null): "24h" | "7d" | "30d" | "90d" | "custom" {
+  const normalized = (preset ?? "7d").toLowerCase().replace(/[ -]/g, "_");
+  if (["24h", "last_24_hours", "last_24h"].includes(normalized)) return "24h";
+  if (["7d", "last_7_days", "last_week", "7_days"].includes(normalized)) return "7d";
+  if (["30d", "last_30_days", "last_month", "30_days"].includes(normalized)) return "30d";
+  if (["90d", "last_90_days", "last_3_months", "90_days"].includes(normalized)) return "90d";
+  return normalized === "custom" ? "custom" : "7d";
+}
+
+function resolveRequestedDateRange(
+  question: string,
+  dateFrom: string | null,
+  dateTo: string | null,
+  datePreset: string | null,
+  now: Date,
+) {
+  const explicitRange = explicitDateRange(question, now);
+  if (explicitRange) return explicitRange;
+  const preset = normalizeDatePreset(datePreset);
+  if (preset === "custom" && dateFrom && dateTo) {
+    return resolveDateRangeApp({ preset: "custom", from: dateFrom, to: dateTo }, now);
+  }
+  if (dateFrom && dateTo) {
+    return resolveDateRangeApp({ preset, from: dateFrom, to: dateTo }, now);
+  }
+  return resolveDateRangeApp({ preset }, now);
+}
+
+function extractEntitySearchVariants(question: string, entity: string): string[] {
+  const variants = new Set([entity.trim()]);
+  const platformWords = new Set(["instagram", "insta", "ig", "facebook", "youtube", "tiktok", "twitter", "reddit", "linkedin", "threads"]);
+  const stop = /\b(?:about|regarding|concerning|for|on|from|of|in|during|within|over|last|past|this|today|yesterday|week|month|year|day|posts?|reels?|videos?|stories|total|count|number|instagram|insta|ig|my|our|the|a|an)\b/i;
+  const subjectMatches = question.matchAll(/\b(?:about|regarding|concerning|for|on|from)\s+([#@]?[\p{L}\p{N}][\p{L}\p{N}._'’-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}._'’-]*){0,5})/giu);
+  for (const match of subjectMatches) {
+    const candidate = (match[1] ?? "").split(stop)[0].trim().replace(/[.,!?;:]+$/, "");
+    const normalized = candidate.replace(/^[@#]/, "").trim();
+    if (normalized && !platformWords.has(normalized.toLowerCase()) && !sameEntityText(normalized, entity)) {
+      variants.add(candidate);
+    }
+  }
+
+  const aliasMatches = question.matchAll(/\b(?:aka|also known as|known as|alias(?:ed)? as)\s+([^,.!?;]+)/giu);
+  for (const match of aliasMatches) {
+    const candidate = (match[1] ?? "").split(stop)[0].trim().replace(/[.,!?;:]+$/, "");
+    if (candidate && !sameEntityText(candidate.replace(/^[@#]/, ""), entity)) variants.add(candidate);
+  }
+
+  return [...variants].filter(Boolean);
+}
+
+export function extractSearchKeywords(question: string, entity: string): string[] {
+  const stopWords = new Set([
+    "what", "are", "is", "the", "a", "an", "of", "for", "about", "on", "in", "to", "from", "by", "with",
+    "how", "many", "number", "total", "count", "counts", "posts", "post", "done", "show", "find", "get", "give", "me", "please", "tell", "tll",
+    "instagram", "insta", "ig", "last", "past", "week", "weeks", "month", "months", "year", "years", "day", "days",
+    "today", "yesterday", "recent", "latest", "within", "during", "over", "after", "before", "this", "that", "these",
+  ]);
+  const entityTexts = [entity, extractExplicitEntity(question) ?? "", ...extractEntitySearchVariants(question, entity)];
+  const entityWords = new Set(entityTexts.flatMap((value) => value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []));
+  const tokens = question.match(/#[\p{L}\p{N}_]+|[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? [];
+  return [...new Set(tokens.filter((token) => {
+    if (token.startsWith("#")) return !entityWords.has(token.slice(1).toLowerCase());
+    const word = token.toLowerCase();
+    return word.length > 1 && !stopWords.has(word) && !entityWords.has(word);
+  }))].slice(0, 4);
+}
+
+type EngagementMetric = "likes" | "comments";
+interface ParsedEngagementMetric {
+  value: number;
+  text: string;
+}
+
+const ENGAGEMENT_NUMBER_PATTERN = String.raw`(\d{1,3}(?:,\d{2,3})+|\d+)(?:\.(\d+))?`;
+const ENGAGEMENT_UNIT_PATTERN = String.raw`(k|m|l|lakh|lakhs|cr|crore|crores)?`;
+
+function parseEngagementMetric(
+  input: string | number,
+  metric: EngagementMetric,
+  allowBareValue = false,
+): ParsedEngagementMetric | null {
+  if (typeof input === "number") {
+    if (!Number.isFinite(input) || input < 0) return null;
+    return { value: Math.round(input), text: `${new Intl.NumberFormat("en-US").format(input)} ${metric}` };
+  }
+
+  const text = input.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+
+  const labeledPattern = new RegExp(
+    String.raw`(?:^|[^\p{L}\p{N}])${ENGAGEMENT_NUMBER_PATTERN}\s*${ENGAGEMENT_UNIT_PATTERN}\s*\+?\s*${metric}(?![\p{L}\p{N}])`,
+    "giu",
+  );
+  const labeledMatches = [...text.matchAll(labeledPattern)];
+  if (labeledMatches.length > 1) {
+    const parsed = labeledMatches.map((match) => metricFromMatch(match, metric));
+    const distinct = new Map(parsed.filter((item): item is ParsedEngagementMetric => item !== null).map((item) => [item.value, item]));
+    return distinct.size === 1 ? [...distinct.values()][0] : null;
+  }
+  if (labeledMatches.length === 1) return metricFromMatch(labeledMatches[0], metric);
+  if (!allowBareValue) return null;
+
+  const barePattern = new RegExp(
+    String.raw`^\s*${ENGAGEMENT_NUMBER_PATTERN}\s*${ENGAGEMENT_UNIT_PATTERN}\s*\+?\s*$`,
+    "i",
+  );
+  const bareMatch = text.match(barePattern);
+  return bareMatch ? metricFromMatch(bareMatch, metric) : null;
+}
+
+function metricFromMatch(
+  match: RegExpMatchArray,
+  metric: EngagementMetric,
+): ParsedEngagementMetric | null {
+  const numeric = Number(`${(match[1] ?? "").replace(/,/g, "")}${match[2] ? `.${match[2]}` : ""}`);
+  if (!Number.isFinite(numeric) || numeric < 0) return null;
+
+  const unit = (match[3] ?? "").toLowerCase();
+  const multiplier = unit === "k" ? 1_000
+    : unit === "m" ? 1_000_000
+    : unit === "l" || unit === "lakh" || unit === "lakhs" ? 100_000
+    : unit === "cr" || unit === "crore" || unit === "crores" ? 10_000_000
+    : 1;
+  const value = Math.round(numeric * multiplier);
+  const amount = `${match[1]}${match[2] ? `.${match[2]}` : ""}${match[3] ? ` ${match[3]}` : ""}`;
+  return { value, text: `${amount} ${metric}` };
+}
+
+function uniqueMetricFromValues(
+  values: Array<string | number>,
+  metric: EngagementMetric,
+  allowBareValue: boolean,
+): ParsedEngagementMetric | null {
+  const parsed = values
+    .map((value) => parseEngagementMetric(value, metric, allowBareValue))
+    .filter((value): value is ParsedEngagementMetric => value !== null);
+  const distinct = new Map(parsed.map((value) => [value.value, value]));
+  return distinct.size === 1 ? [...distinct.values()][0] : null;
+}
+
+function extractOwner(raw: SerpApiOrganicResult): string | null {
+  const owner = raw.owner;
+  if (typeof owner === "string" && owner.trim()) return owner.trim().replace(/^@/, "");
+  if (owner && typeof owner === "object") {
+    const username = "username" in owner ? owner.username : null;
+    if (typeof username === "string" && username.trim()) return username.trim().replace(/^@/, "");
+  }
+  if (typeof raw.username === "string" && raw.username.trim()) return raw.username.trim().replace(/^@/, "");
+  return null;
+}
+
+function extractHashtags(caption: string | null, supplied: unknown): string[] {
+  const values = Array.isArray(supplied)
+    ? supplied.filter((value): value is string => typeof value === "string")
+    : [];
+  const fromCaption = caption?.match(/#[\p{L}\p{N}_]+/gu) ?? [];
+  return [...new Set([...values, ...fromCaption])];
+}
+
+function extractSnippetHashtags(snippet: string | null): string[] {
+  return [...new Set(snippet?.match(/#[\p{L}\p{N}_]+/gu) ?? [])];
 }
 
 function extractAccountFromText(title: string, snippet: string | null, displayedLink: string | null): string {
@@ -134,7 +321,9 @@ function extractAccountFromText(title: string, snippet: string | null, displayed
   if (onMatch) return onMatch[1].toLowerCase();
 
   if (displayedLink) {
-    const linkMatch = displayedLink.match(/instagram\.com\/([A-Za-z0-9._]{1,30})/i);
+    const linkMatch = displayedLink.match(
+      /instagram\.com\/(?!p(?:\/|$)|reel(?:\/|$)|reels(?:\/|$)|tv(?:\/|$))([A-Za-z0-9._]{1,30})/i,
+    );
     if (linkMatch) return linkMatch[1].toLowerCase();
   }
 
@@ -148,83 +337,77 @@ function extractGoogleRelativeTime(snippet: string | null): string | null {
 }
 
 function isPostUrl(url: string): boolean {
-  return /\/p\/|\/reel\/|\/reels\/|\/tv\//i.test(url);
+  return /\/(?:p|reel|reels|tv)\/[^/?#]+/i.test(url);
+}
+
+function canonicalInstagramPostUrl(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!/(^|\.)instagram\.com$/i.test(parsed.hostname)) return null;
+    const [, route, shortcode] = parsed.pathname.match(/^\/(p|reel|reels|tv)\/([^/]+)/i) ?? [];
+    if (!route || !shortcode) return null;
+    return `https://www.instagram.com/${route.toLowerCase()}/${shortcode}/`;
+  } catch {
+    return null;
+  }
 }
 
 function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
-  if (!raw.link || !raw.title) return null;
-  if (!isPostUrl(raw.link)) return null;
+  if (!raw.link || !isPostUrl(raw.link)) return null;
+  const url = canonicalInstagramPostUrl(raw.link);
+  if (!url) return null;
 
-  const title = raw.title;
-  const url = raw.link;
+  const title = raw.title ?? "Not returned";
   const snippet = raw.snippet ?? null;
   const displayedLink = raw.displayed_link ?? null;
 
   const shortcode = shortcodeFromUrl(url);
   if (!shortcode) return null;
 
-  const account = extractAccountFromText(title, snippet, displayedLink);
+  const returnedOwner = extractOwner(raw);
+  const account = returnedOwner ?? extractAccountFromText(title, snippet, displayedLink);
+  const accountSource = returnedOwner ? "provider" : account !== "unknown" ? "search-result text" : null;
   const googleRelativeTime = extractGoogleRelativeTime(snippet);
+  const captionValue = typeof raw.caption === "string" ? raw.caption : raw.caption_text;
+  const caption = typeof captionValue === "string" && captionValue.trim() ? captionValue.trim() : null;
+  const hashtags = extractHashtags(caption, raw.hashtags);
+  const snippetHashtags = extractSnippetHashtags(snippet);
 
-  let likesText: string | null = null;
-  let likesNum: number | null = null;
-  let commentsText: string | null = null;
-  let commentsNum: number | null = null;
+  const detected = raw.rich_snippet?.top?.detected_extensions ?? {};
+  const detectedLikes = Object.entries(detected)
+    .filter(([key]) => /likes?/i.test(key))
+    .map(([, value]) => String(value));
+  const detectedComments = Object.entries(detected)
+    .filter(([key]) => /comments?/i.test(key))
+    .map(([, value]) => String(value));
+  const extensionValues = (raw.extensions ?? []).map(String);
 
-  const detected = raw.rich_snippet?.top?.detected_extensions;
-  if (detected) {
-    for (const [key, value] of Object.entries(detected)) {
-      const val = String(value);
-      if (/likes?/i.test(key) && !likesText) {
-        likesText = val;
-        likesNum = parseLikesNum(val);
-      }
-      if (/comments?/i.test(key) && !commentsText) {
-        commentsText = val;
-        commentsNum = parseCommentsNum(val);
-      }
-    }
-  }
+  const likesMetric = uniqueMetricFromValues(
+    raw.likes !== undefined ? [raw.likes] : [], "likes", true,
+  ) ?? uniqueMetricFromValues(detectedLikes, "likes", true)
+    ?? uniqueMetricFromValues(extensionValues, "likes", false)
+    ?? (snippet ? parseEngagementMetric(snippet, "likes", false) : null);
+  const commentsMetric = uniqueMetricFromValues(
+    raw.comments !== undefined ? [raw.comments] : [], "comments", true,
+  ) ?? uniqueMetricFromValues(detectedComments, "comments", true)
+    ?? uniqueMetricFromValues(extensionValues, "comments", false)
+    ?? (snippet ? parseEngagementMetric(snippet, "comments", false) : null);
 
-  if (!likesText || !commentsText) {
-    for (const ext of raw.extensions ?? []) {
-      const extStr = String(ext);
-      if (!likesText && /likes?/i.test(extStr)) {
-        likesText = extStr;
-        likesNum = parseLikesNum(extStr);
-      }
-      if (!commentsText && /comments?/i.test(extStr)) {
-        commentsText = extStr;
-        commentsNum = parseCommentsNum(extStr);
-      }
-    }
-  }
-
-  if ((!likesText || !commentsText) && snippet) {
-    if (!likesText) {
-      const likesMatch = snippet.match(/([\d.,]+\s*[KM]?\+?\s*likes?)/i);
-      if (likesMatch && likesMatch[1]) {
-        likesText = likesMatch[1];
-        likesNum = parseLikesNum(likesText);
-      }
-    }
-    if (!commentsText) {
-      const commentsMatch = snippet.match(/([\d.,]+\s*[KM]?\+?\s*comments?)/i);
-      if (commentsMatch && commentsMatch[1]) {
-        commentsText = commentsMatch[1];
-        commentsNum = parseCommentsNum(commentsText);
-      }
-    }
-  }
+  const likesText = likesMetric?.text ?? null;
+  const likesNum = likesMetric?.value ?? null;
+  const commentsText = commentsMetric?.text ?? null;
+  const commentsNum = commentsMetric?.value ?? null;
 
   let dateISO: string | null = null;
   let dateText: string | null = null;
+  let dateSource: "provider" | "shortcode" | null = null;
 
   if (raw.date) {
     const parsed = new Date(raw.date);
     if (!isNaN(parsed.getTime())) {
       dateISO = parsed.toISOString();
       dateText = parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      dateSource = "provider";
     }
   }
 
@@ -233,15 +416,17 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
     if (d) {
       dateISO = d.toISOString();
       dateText = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      dateSource = "shortcode";
     }
   }
 
-  const snippetForGemini = (snippet ?? "").replace(/\s+/g, " ").slice(0, 220);
+  const snippetForGemini = (snippet ?? "").replace(/\s+/g, " ");
 
   return {
     url,
     title,
     account,
+    accountSource,
     dateISO,
     dateText,
     googleRelativeTime,
@@ -249,211 +434,220 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
     likesNum,
     commentsText,
     commentsNum,
+    caption,
+    hashtags,
+    snippetHashtags,
     snippet: snippetForGemini,
+    dateSource,
+    providerMetadata: { ...raw },
+  };
+}
+
+function dateAtUtcNoonForLocalDay(iso: string, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(iso));
+  const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return new Date(Date.UTC(value("year"), value("month") - 1, value("day"), 12)).toISOString();
+}
+
+function toGoogleEstimateDateRange(range: ResolvedDateRangeApp): ResolvedDateRangeApp {
+  return {
+    ...range,
+    from: dateAtUtcNoonForLocalDay(range.from, range.timezone),
+    to: dateAtUtcNoonForLocalDay(range.to, range.timezone),
   };
 }
 
 interface SearchResult {
   posts: SimpleInstagramPost[];
-  searchInformation: SerpApiSearchInformation | null;
-  searchMetadata: SerpApiSearchMetadata | null;
-  rawFirstPageResult: SerpApiOrganicResult | null;
+  googleEstimate: number | string | null;
+  estimateQuery: string | null;
+  estimateDateRange: { from: string; to: string; label: string; timezone: string; preset: string | null } | null;
+  estimateDateFilter: string | null;
+  estimateNumResults: number | null;
+  estimateProviderTotalResults: number | string | null;
+  estimateProvenance: {
+    query: string;
+    queryDisplayed: string | null;
+    parameters: Record<string, string>;
+    totalResults: number | string | null;
+  } | null;
+  estimateError: string | null;
+  rawOrganicResultsFetched: number;
+  pagesFetched: number;
+  queriesAtPageLimit: string[];
+  paginationErrors: string[];
   error: string | null;
-  rangeUsed: { from: string; to: string; label: string } | null;
   queriesTried: string[];
 }
 
 async function searchInstagramPosts(
   entities: string[],
-  rangeFrom: string,
-  rangeTo: string,
-  rangeLabel: string,
+  keywords: string[],
+  range: ResolvedDateRangeApp,
   config: ReturnType<typeof getResearchConfig>,
   signal?: AbortSignal
 ): Promise<SearchResult> {
+  const rangeFrom = range.from;
+  const rangeTo = range.to;
+  const rangeLabel = range.label;
   const serpApiKey = getSerpApiKey();
-  if (!serpApiKey) {
-    throw new Error("SERPAPI_API_KEY not configured");
-  }
+  if (!serpApiKey) throw new Error("SERPAPI_API_KEY not configured");
 
   const provider = createSerpApiProvider({
     apiKey: serpApiKey,
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
   });
+  const afterText = adjustDateForTextOp(rangeFrom, -1);
+  const beforeText = adjustDateForTextOp(rangeTo, 1);
+  const paths = ["/p/", "/reel/", "/reels/", "/tv/"];
+  const representativeEntity = entities[0] ?? null;
+  const estimateEntity = representativeEntity?.replace(/[\"\r\n]/g, " ").replace(/\s+/g, " ").trim() ?? "";
+  const estimateQuery = estimateEntity ? `site:instagram.com ${estimateEntity}` : null;
+  const estimateDateRange = range;
+  const estimateProviderDateRange = toGoogleEstimateDateRange(range);
+  const estimateDateFilter = toSerpApiTbsApp(estimateProviderDateRange);
+  const estimateNumResults = estimateQuery ? config.maxResultsPerQuery : null;
+  let googleEstimate: number | string | null = null;
+  let estimateProviderTotalResults: number | string | null = null;
+  let estimateProvenance: SearchResult["estimateProvenance"] = null;
+  let estimateError: string | null = null;
 
-  // Build date ranges to try: original, 7d, 30d, no date
-  const rangesToTry: Array<{ label: string; from: string; to: string; afterText: string; beforeText: string; tbs: string }> = [];
-  
-  // Original range
-  const tbsFrom = formatDateForTbs(rangeFrom);
-  const tbsTo = formatDateForTbs(rangeTo);
-  const originalTbs = `cdr:1,cd_min:${tbsFrom},cd_max:${tbsTo}`;
-  const originalAfter = adjustDateForTextOp(rangeFrom, -1);
-  const originalBefore = adjustDateForTextOp(rangeTo, 1);
-  rangesToTry.push({
-    label: rangeLabel,
-    from: rangeFrom,
-    to: rangeTo,
-    afterText: originalAfter,
-    beforeText: originalBefore,
-    tbs: originalTbs
-  });
-
-  // 7 days if original is shorter than 7 days
-  const originalDays = (new Date(rangeTo).getTime() - new Date(rangeFrom).getTime()) / (1000 * 60 * 60 * 24);
-  if (originalDays < 7) {
-    const now = new Date();
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const sevenDaysFrom = sevenDaysAgo.toISOString().split("T")[0];
-    const sevenDaysTo = now.toISOString().split("T")[0];
-    const tbs7From = formatDateForTbs(sevenDaysFrom);
-    const tbs7To = formatDateForTbs(sevenDaysTo);
-    const sevenTbs = `cdr:1,cd_min:${tbs7From},cd_max:${tbs7To}`;
-    const sevenAfter = adjustDateForTextOp(sevenDaysFrom, -1);
-    const sevenBefore = adjustDateForTextOp(sevenDaysTo, 1);
-    rangesToTry.push({
-      label: "Last 7 days",
-      from: sevenDaysFrom,
-      to: sevenDaysTo,
-      afterText: sevenAfter,
-      beforeText: sevenBefore,
-      tbs: sevenTbs
-    });
+  if (estimateQuery && estimateNumResults !== null) {
+    try {
+      const estimateResponse = await provider.searchWithInfo(
+        {
+          query: estimateQuery,
+          numResults: estimateNumResults,
+          dateRange: estimateProviderDateRange,
+          fetchAllPages: false,
+          newsOnly: false,
+        },
+        { signal },
+      );
+      const providerTotalResults = estimateResponse.searchInformation?.total_results;
+      estimateProvenance = {
+        query: estimateQuery,
+        queryDisplayed: estimateResponse.searchInformation?.query_displayed ?? null,
+        parameters: estimateResponse.requestParameters ?? {},
+        totalResults: providerTotalResults ?? null,
+      };
+      if (providerTotalResults !== undefined && providerTotalResults !== null) {
+        googleEstimate = providerTotalResults;
+        estimateProviderTotalResults = providerTotalResults;
+      } else {
+        estimateError = "SerpAPI omitted search_information.total_results.";
+      }
+    } catch (error) {
+      estimateError = error instanceof Error ? error.message : String(error);
+      logger.warn("Instagram Google estimate query failed", { error: estimateError, query: estimateQuery });
+    }
   }
 
-  // 30 days
-  const now = new Date();
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const thirtyDaysFrom = thirtyDaysAgo.toISOString().split("T")[0];
-  const thirtyDaysTo = now.toISOString().split("T")[0];
-  const tbs30From = formatDateForTbs(thirtyDaysFrom);
-  const tbs30To = formatDateForTbs(thirtyDaysTo);
-  const thirtyTbs = `cdr:1,cd_min:${tbs30From},cd_max:${tbs30To}`;
-  const thirtyAfter = adjustDateForTextOp(thirtyDaysFrom, -1);
-  const thirtyBefore = adjustDateForTextOp(thirtyDaysTo, 1);
-  rangesToTry.push({
-    label: "Last 30 days",
-    from: thirtyDaysFrom,
-    to: thirtyDaysTo,
-    afterText: thirtyAfter,
-    beforeText: thirtyBefore,
-    tbs: thirtyTbs
-  });
-
-  // No date restriction
-  rangesToTry.push({
-    label: "All time",
-    from: "",
-    to: "",
-    afterText: "",
-    beforeText: "",
-    tbs: ""
+  const discoveryTerms = new Map<string, string>();
+  for (const variant of entities) {
+    const entityVariant = variant.trim();
+    if (!entityVariant) continue;
+    discoveryTerms.set(entityVariant, entityVariant);
+    for (const keyword of keywords) {
+      if (!sameEntityText(keyword, entityVariant)) {
+        const combined = `${entityVariant} ${keyword}`.replace(/\s+/g, " ").trim();
+        discoveryTerms.set(combined, entityVariant);
+      }
+    }
+  }
+  const discoveryQueries = paths.flatMap((path) =>
+    [...discoveryTerms.entries()].flatMap(([term, entity]) => {
+      const safeTerm = term.replace(/[\"\r\n]/g, " ").replace(/\s+/g, " ").trim();
+      const queries = [`site:instagram.com inurl:${path} \"${safeTerm}\" after:${afterText} before:${beforeText}`];
+      if (safeTerm.includes(" ")) {
+        queries.push(`site:instagram.com inurl:${path} ${safeTerm} after:${afterText} before:${beforeText}`);
+      }
+      return queries.map((query) => ({ entity, query }));
+    }),
+  );
+  const seenQueries = new Set<string>();
+  const queryVariations = discoveryQueries.filter(({ query }) => {
+    if (seenQueries.has(query)) return false;
+    seenQueries.add(query);
+    return true;
   });
 
   const allPosts: SimpleInstagramPost[] = [];
-  let searchInformation: SerpApiSearchInformation | null = null;
-  let searchMetadata: SerpApiSearchMetadata | null = null;
-  let rawFirstPageResult: SerpApiOrganicResult | null = null;
-  const seenShortcodes = new Set<string>();
+  const seenPostShortcodes = new Set<string>();
   const queriesTried: string[] = [];
+  const queriesAtPageLimit: string[] = [];
+  const paginationErrors: string[] = [];
+  let rawOrganicResultsFetched = 0;
+  let pagesFetched = 0;
   let lastError: string | null = null;
-  let usedRange: { from: string; to: string; label: string } | null = null;
 
-  for (const range of rangesToTry) {
-    // Build query variations for each entity: exact, broad, very broad
-    const queryVariations: Array<{entity: string; query: string}> = [];
-    for (const entity of entities) {
-      if (range.tbs) {
-        queryVariations.push({ entity, query: `site:instagram.com "${entity}" after:${range.afterText} before:${range.beforeText}` });
-        queryVariations.push({ entity, query: `site:instagram.com ${entity} after:${range.afterText} before:${range.beforeText}` });
-        queryVariations.push({ entity, query: `${entity} instagram after:${range.afterText} before:${range.beforeText}` });
-      } else {
-        queryVariations.push({ entity, query: `site:instagram.com "${entity}"` });
-        queryVariations.push({ entity, query: `site:instagram.com ${entity}` });
-        queryVariations.push({ entity, query: `${entity} instagram` });
-      }
-    }
+  for (const { entity, query } of queryVariations) {
+    queriesTried.push(query);
+    logger.info("Instagram simple query", { query, entity, rangeLabel });
 
-    for (const { entity, query } of queryVariations) {
-      queriesTried.push(query);
-      
-      logger.info("Instagram simple query", { query, entity, rangeLabel: range.label });
-
-      const firstPage = await provider.searchWithInfo?.(
+    let result: SerpApiSearchResult;
+    try {
+      result = await provider.searchWithInfo(
         {
           query,
           numResults: config.maxResultsPerQuery,
-          dateRange: { from: range.from, to: range.to, label: range.label, timezone: "UTC", preset: null },
-          pages: 1,
+          dateRange: estimateDateRange,
+          fetchAllPages: true,
           newsOnly: false,
         },
-        { signal }
+        { signal },
       );
-
-      if (!firstPage) {
-        lastError = "Provider does not support searchWithInfo";
-        continue;
-      }
-
-      // Check for SerpAPI errors
-      const serpError = (firstPage as { error?: string }).error;
-      const serpStatus = firstPage.searchMetadata?.status;
-      
-      if (serpError && !isEmptyResultError(serpError)) {
-        lastError = `SerpAPI error: ${serpError}`;
-        logger.error("SerpAPI error", { error: serpError, status: serpStatus, entity, query });
-        continue;
-      }
-      
-      if (serpStatus && serpStatus !== "Success") {
-        lastError = `SerpAPI status: ${serpStatus}`;
-        logger.error("SerpAPI non-success status", { status: serpStatus, entity, query });
-        continue;
-      }
-
-      const rawOrganicResults = firstPage.rawOrganicResults;
-      if (!searchInformation) searchInformation = firstPage.searchInformation;
-      if (!searchMetadata) searchMetadata = firstPage.searchMetadata;
-
-      if (rawOrganicResults.length > 0) {
-        logger.debug("Raw organic result sample", { raw: rawOrganicResults[0] });
-      }
-
-      for (const raw of rawOrganicResults) {
-        if (rawFirstPageResult === null && raw.link && raw.title) {
-          rawFirstPageResult = raw;
-        }
-        const normalized = normalizePost(raw);
-        if (!normalized) continue;
-        const sc = shortcodeFromUrl(normalized.url);
-        if (sc && seenShortcodes.has(sc)) continue;
-        if (sc) seenShortcodes.add(sc);
-        allPosts.push(normalized);
-      }
-
-      if (allPosts.length > 0) {
-        usedRange = { from: range.from, to: range.to, label: range.label };
-        break;
-      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      paginationErrors.push(`${query}: ${lastError}`);
+      logger.error("Instagram SerpAPI query failed", { error: lastError, entity, query });
+      continue;
     }
 
-    if (allPosts.length > 0) break;
+    if (!result) {
+      lastError = "Provider does not support searchWithInfo";
+      paginationErrors.push(`${query}: ${lastError}`);
+      continue;
+    }
+    rawOrganicResultsFetched += result.rawOrganicResults.length;
+    pagesFetched += result.pagesFetched;
+    if (result.pageLimitReached) queriesAtPageLimit.push(query);
+    if (result.paginationError) paginationErrors.push(`${query}: ${result.paginationError}`);
+
+    for (const raw of result.rawOrganicResults) {
+      const normalized = normalizePost(raw);
+      if (!normalized) continue;
+      const canonicalUrl = canonicalInstagramPostUrl(normalized.url);
+      const postShortcode = canonicalUrl ? shortcodeFromUrl(canonicalUrl) : null;
+      if (!canonicalUrl || !postShortcode || seenPostShortcodes.has(postShortcode)) continue;
+      seenPostShortcodes.add(postShortcode);
+      allPosts.push({ ...normalized, url: canonicalUrl });
+    }
   }
 
-  return { 
-    posts: allPosts, 
-    searchInformation, 
-    searchMetadata, 
-    rawFirstPageResult, 
-    error: lastError,
-    rangeUsed: usedRange,
-    queriesTried
+  return {
+    posts: allPosts,
+    googleEstimate,
+    estimateQuery,
+    estimateDateRange: estimateQuery ? estimateDateRange : null,
+    estimateDateFilter: estimateQuery ? estimateDateFilter : null,
+    estimateNumResults,
+    estimateProviderTotalResults,
+    estimateProvenance,
+    estimateError,
+    rawOrganicResultsFetched,
+    pagesFetched,
+    queriesAtPageLimit,
+    paginationErrors,
+    error: allPosts.length === 0 ? lastError : null,
+    queriesTried,
   };
-}
-
-function isEmptyResultError(message: string): boolean {
-  return /hasn'?t returned any results|did not match any documents|no results(?:\s+found)?|no search results/i.test(message.toLowerCase());
 }
 
 async function fetchMorePosts(
@@ -469,47 +663,41 @@ async function fetchMorePosts(
 
   const afterText = adjustDateForTextOp(rangeFrom, -1);
   const beforeText = adjustDateForTextOp(rangeTo, 1);
-
-  const query = `site:instagram.com "${entity}" after:${afterText} before:${beforeText}`;
-
+  const query = `site:instagram.com inurl:/p/ "${entity}" after:${afterText} before:${beforeText}`;
   const provider = createSerpApiProvider({
     apiKey: serpApiKey,
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
   });
+  const result = await provider.searchWithInfo?.(
+    {
+      query,
+      numResults: config.maxResultsPerQuery,
+      dateRange: { from: rangeFrom, to: rangeTo, label: "", timezone: "UTC", preset: null },
+      fetchAllPages: true,
+      newsOnly: false,
+    },
+    { signal },
+  );
+  if (!result) return existingPosts;
 
-  const seenShortcodes = new Set(existingPosts.map(p => shortcodeFromUrl(p.url)).filter(Boolean) as string[]);
+  const seenPostShortcodes = new Set(
+    existingPosts
+      .map((post) => canonicalInstagramPostUrl(post.url))
+      .filter((url): url is string => Boolean(url))
+      .map((url) => shortcodeFromUrl(url))
+      .filter((shortcode): shortcode is string => Boolean(shortcode)),
+  );
   const allPosts = [...existingPosts];
-  let searchesUsed = 1;
-
-  for (let page = 2; page <= 10 && searchesUsed < 12; page += 1) {
-    const additionalResult = await provider.searchWithInfo?.(
-      {
-        query,
-        numResults: config.maxResultsPerQuery,
-        dateRange: { from: rangeFrom, to: rangeTo, label: "", timezone: "UTC", preset: null },
-        pages: 1,
-        newsOnly: false,
-      },
-      { signal }
-    );
-
-    if (!additionalResult || additionalResult.rawOrganicResults.length === 0) {
-      break;
-    }
-
-    searchesUsed += 1;
-
-    for (const raw of additionalResult.rawOrganicResults) {
-      const normalized = normalizePost(raw);
-      if (!normalized) continue;
-      const sc = shortcodeFromUrl(normalized.url);
-      if (sc && seenShortcodes.has(sc)) continue;
-      if (sc) seenShortcodes.add(sc);
-      allPosts.push(normalized);
-    }
+  for (const raw of result.rawOrganicResults) {
+    const normalized = normalizePost(raw);
+    if (!normalized) continue;
+    const canonicalUrl = canonicalInstagramPostUrl(normalized.url);
+    const postShortcode = canonicalUrl ? shortcodeFromUrl(canonicalUrl) : null;
+    if (!canonicalUrl || !postShortcode || seenPostShortcodes.has(postShortcode)) continue;
+    seenPostShortcodes.add(postShortcode);
+    allPosts.push({ ...normalized, url: canonicalUrl });
   }
-
   return allPosts;
 }
 
@@ -601,49 +789,6 @@ function sortPostsByLikes(posts: SimpleInstagramPost[]): SimpleInstagramPost[] {
   return posts;
 }
 
-function formatDateDisplay(post: SimpleInstagramPost): string {
-  if (post.googleRelativeTime) return post.googleRelativeTime;
-  if (post.dateText) return post.dateText;
-  return "—";
-}
-
-function truncateCaption(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, maxLen - 1).trimEnd() + "…";
-}
-
-function renderPostsTable(posts: SimpleInstagramPost[], startIndex: number = 0): string {
-  if (posts.length === 0) return "";
-  
-  const headers = ["#", "Title", "Account", "Caption", "Likes", "Comments", "Date"];
-  const rows = posts.map((post, i) => [
-    String(startIndex + i + 1),
-    `[${truncateCaption(post.title, 60)}](${post.url})`,
-    post.account === "unknown" ? "—" : `@${post.account}`,
-    post.snippet ? truncateCaption(post.snippet, 140) : "—",
-    post.likesText ?? "—",
-    post.commentsText ?? "—",
-    formatDateDisplay(post),
-  ]);
-
-  // Generate markdown table
-  let table = "| " + headers.join(" | ") + " |\n";
-  table += "| " + headers.map(() => "---").join(" | ") + " |\n";
-  for (const row of rows) {
-    table += "| " + row.join(" | ") + " |\n";
-  }
-  
-  return table;
-}
-
-function renderLikesSummary(posts: SimpleInstagramPost[]): string | null {
-  const postsWithLikes = posts.filter(p => p.likesNum !== null);
-  if (postsWithLikes.length < 3) return null;
-  
-  const total = postsWithLikes.reduce((sum, p) => sum + (p.likesNum ?? 0), 0);
-  return `<p class="mt-2 text-xs text-muted-foreground">Likes shown on these posts: ~${formatNumberWithSeparators(total)} <span class="italic">(Only posts where Google shows likes are counted.)</span></p>`;
-}
-
 export async function runSimpleInstagramResearch(
   question: string,
   history: string[],
@@ -691,18 +836,24 @@ export async function runSimpleInstagramResearch(
     };
   }
 
-  let entity: string | null = null;
+  let entity: string | null = extractExplicitEntity(question);
   let intent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` = "narrative";
   try {
-    const extraction = await extractEntityWithGemini(history, gemini);
-    entity = extraction.entity;
+    const extraction = await extractEntityWithGemini(question, history, gemini);
+    entity = entity ?? extraction.entity;
     intent = extraction.intent;
   } catch (error) {
     logger.warn("Simple Instagram entity extraction failed", { error: error instanceof Error ? error.message : "unknown" });
-    return {
-      message: "Which person, brand or hashtag should I look into?",
-      meta: { ...emptyMeta, limitations: ["Entity extraction failed"] }
-    };
+    if (!entity) {
+      return {
+        message: "Which person, brand or hashtag should I look into?",
+        meta: { ...emptyMeta, limitations: ["Entity extraction failed"] }
+      };
+    }
+  }
+
+  if (/\b(?:how many|total number|number of|post count|count of|count)\b/i.test(question)) {
+    intent = "count";
   }
 
   if (intent === "chat") {
@@ -724,156 +875,108 @@ export async function runSimpleInstagramResearch(
     intent = "narrative";
   }
 
-  let rangeFrom: string;
-  let rangeTo: string;
-  let rangeLabel: string;
+  const requestedRange = resolveRequestedDateRange(question, dateFrom, dateTo, datePreset, now);
+  const rangeFrom = requestedRange.from;
+  const rangeTo = requestedRange.to;
+  const rangeLabel = requestedRange.label;
+  const keywords = extractSearchKeywords(question, entity);
+  const entityVariants = extractEntitySearchVariants(question, entity);
 
-  if (dateFrom && dateTo) {
-    rangeFrom = dateFrom;
-    rangeTo = dateTo;
-    rangeLabel = `${new Date(rangeFrom).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} – ${new Date(rangeTo).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
-  } else {
-    const preset = datePreset ?? "last_7_days";
-    const { resolveDateRangeApp } = await import("@/lib/research/dateRange");
-    const resolved = resolveDateRangeApp({ preset: preset as "24h" | "7d" | "30d" | "90d" | "custom" }, now);
-    rangeFrom = resolved.from;
-    rangeTo = resolved.to;
-    rangeLabel = resolved.label;
-  }
+  // Search the resolved current entity and explicit aliases without losing the date window.
+  const searchResult = await searchInstagramPosts(entityVariants, keywords, requestedRange, config, signal);
+  const {
+    posts,
+    error,
+    queriesTried,
+    googleEstimate,
+    estimateQuery,
+    estimateDateRange,
+    estimateDateFilter,
+    estimateNumResults,
+    estimateProviderTotalResults,
+    estimateProvenance,
+    estimateError,
+    rawOrganicResultsFetched,
+    queriesAtPageLimit,
+    paginationErrors,
+  } = searchResult;
 
-  // Try multiple entity variations: corrected name first, then original user query
-  const originalQuery = question.trim();
-  const entityVariations = [entity];
-  if (originalQuery.toLowerCase() !== entity.toLowerCase()) {
-    entityVariations.push(originalQuery);
-  }
-
-  const searchResult = await searchInstagramPosts(entityVariations, rangeFrom, rangeTo, rangeLabel, config, signal);
-  const { posts, searchInformation, error, rangeUsed, queriesTried } = searchResult;
-
-  // Handle SerpAPI errors
-  if (error) {
+  if (error && googleEstimate === null) {
     logger.error("Instagram search failed", { error, entity, queries: queriesTried });
     return {
       message: "I couldn't reach Google search just now. Please try again in a minute.",
-      meta: { ...emptyMeta, limitations: [error] }
+      meta: { ...emptyMeta, limitations: [error] },
     };
   }
 
-  // Use the range that actually returned posts
-  const actualRangeLabel = rangeUsed?.label ?? rangeLabel;
+  const allPosts = sortPostsByLikes(posts);
+  let message = "";
 
-  let estimateLine: string | null = null;
-  if (searchInformation?.total_results) {
-    const total = typeof searchInformation.total_results === "string"
-      ? parseInt(searchInformation.total_results, 10)
-      : searchInformation.total_results;
-    if (Number.isFinite(total)) {
-      estimateLine = `About ${formatNumberWithSeparators(total)} results on Google for ${entity} on Instagram, ${actualRangeLabel}.`;
-    }
-  }
-
-  const sortedPosts = sortPostsByLikes(posts);
-  const topPosts = sortedPosts.slice(0, 5);
-  const allPosts = sortedPosts;
-
-  const lines: string[] = [];
-  
-  if (estimateLine) {
-    lines.push(estimateLine);
-  }
-  
-  lines.push(`Showing results for ${entity}`);
-  
-  // Add widening note if range was widened
-  if (rangeUsed && rangeUsed.label !== rangeLabel) {
-    lines.push(`Nothing found for ${rangeLabel}, so this shows ${rangeUsed.label}.`);
-  }
-  
-  lines.push("");
-
-  if (intent === "show_more" || question.toLowerCase().includes("show more") || question.toLowerCase().includes("more posts")) {
-    lines.push(`**All ${allPosts.length} posts**`);
-    lines.push("");
-    
-    for (let i = 0; i < allPosts.length; i += 10) {
-      const pagePosts = allPosts.slice(i, i + 10);
-      lines.push(renderPostsTable(pagePosts, i));
-      lines.push("");
-    }
-  } else if (posts.length > 0) {
-    let geminiAnswer: string | null = null;
+  if (allPosts.length > 0) {
     try {
-      const postsForGemini = posts.slice(0, 30).map(p => ({
-        title: p.title,
-        account: p.account,
-        date: p.dateText ?? p.googleRelativeTime ?? p.dateISO,
-        likes: p.likesText,
-        snippet: p.snippet,
+      const postsForGemini = allPosts.slice(0, 30).map((post) => ({
+        title: post.title,
+        account: post.account,
+        date: post.dateText ?? post.googleRelativeTime ?? post.dateISO,
+        likes: post.likesText,
+        snippet: post.snippet,
       }));
-      
-      // Determine analysis intent - use template literal for business_fit to pass business type
       let analysisIntent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` = intent;
       if (intent === "business_fit") {
-        // Extract business type from question
         const businessMatch = question.match(/(?:for my|for our|for the)\s+([a-z\s]+?)(?:\s|$|\?)/i);
         const businessType = businessMatch ? businessMatch[1].trim() : "business";
         analysisIntent = `business_fit:${businessType}`;
       }
-      
-      geminiAnswer = await analyzeWithGemini({ posts: postsForGemini, intent: analysisIntent, entity }, gemini);
+      message = await analyzeWithGemini({ posts: postsForGemini, intent: analysisIntent, entity }, gemini);
     } catch (error) {
       logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
     }
-
-    if (geminiAnswer) {
-      lines.push(geminiAnswer);
-      lines.push("");
-    }
-
-    if (topPosts.length > 0) {
-      lines.push("**Top posts**");
-      lines.push("");
-      lines.push(renderPostsTable(topPosts));
-      const likesSummary = renderLikesSummary(topPosts);
-      if (likesSummary) {
-        lines.push(likesSummary);
-      }
-      lines.push("");
-    }
-
-    if (allPosts.length > 5) {
-      lines.push(`[Show all ${allPosts.length} posts](#show-more)`);
-    }
-
-    lines.push("");
-    
-    // Different follow-up questions based on intent
-    if (intent === "business_fit") {
-      lines.push("Want me to check another person or look at a different date range?");
-    } else {
-      lines.push("Want more posts, another person, or a different date range?");
-    }
-  } else {
-    lines.push(`I couldn't find Instagram posts for ${entity}. Could you check the spelling or give me the Instagram handle?`);
   }
 
-  const message = lines.join("\n").trim();
+  const instagramResults = {
+    entity,
+    dateRangeLabel: rangeLabel,
+    googleEstimatedResults: googleEstimate === null ? null : String(googleEstimate),
+    estimateQuery,
+    estimateDateRange,
+    estimateDateFilter,
+    estimateNumResults,
+    estimateProviderTotalResults,
+    estimateProvenance,
+    estimateError,
+    isCountRequest: intent === "count",
+    posts: allPosts.map((post) => ({
+      title: post.title,
+      url: post.url,
+      caption: post.caption,
+      snippet: post.snippet,
+      hashtags: post.hashtags,
+      snippetHashtags: post.snippetHashtags,
+      account: post.account,
+      likes: post.likesText,
+      comments: post.commentsText,
+      postedDate: post.dateText ?? post.googleRelativeTime,
+    })),
+  };
 
   const limitations = [
-    "Search results are a sample of Google-indexed Instagram content, not a measure of total activity.",
-    "Engagement metrics shown only when the retrieved page supplied them; missing counts are unknown, not zero.",
-    "Dates are for display only; no date-based filtering or dropping was applied."
+    "Google result estimates are approximate, can overlap across dorks, and are not Instagram-wide post counts.",
+    "Retrieved unique post candidates are limited to results Google/SerpAPI returned for these queries.",
+    "Caption, engagement, owner, and date fields remain unknown unless returned; Google dates/snippets are not independently verified.",
+  ];
+  const warnings = [
+    ...(queriesAtPageLimit.length ? [`${queriesAtPageLimit.length} dork(s) reached a requested page ceiling; more results may exist.`] : []),
+    ...(paginationErrors.length ? [`SerpAPI stopped pagination early for ${paginationErrors.length} dork(s).`] : []),
   ];
 
   const meta: ResearchMeta = {
-    status: "ok",
+    status: warnings.length ? "degraded" : "ok",
     question,
     intent: "narratives",
-    dateRange: { from: rangeFrom, to: rangeTo, label: rangeLabel, timezone: "UTC", preset: null },
+    dateRange: { ...requestedRange },
     previousDateRange: null,
-    queries: [`site:instagram.com "${entity}"`],
-    resultsRetrieved: allPosts.length,
+    queries: [],
+    resultsRetrieved: rawOrganicResultsFetched,
     resultsAfterDedupe: allPosts.length,
     resultsIncluded: allPosts.length,
     undatedExcluded: 0,
@@ -882,8 +985,9 @@ export async function runSimpleInstagramResearch(
     comparisonAvailable: false,
     integrations: { gemini: { configured: true, model: "gemini-1.5-flash" }, serpapi: { configured: true }, newsapi: { configured: false } },
     limitations,
-    warnings: [],
+    warnings,
     generatedAt: new Date().toISOString(),
+    instagramResults,
   };
 
   return { message, meta };
@@ -901,20 +1005,5 @@ export async function runShowMorePosts(
   
   const allPosts = await fetchMorePosts(entity, rangeFrom, rangeTo, config, existingPosts, signal);
   const sortedPosts = sortPostsByLikes(allPosts);
-  
-  const lines: string[] = [];
-  lines.push(`Showing results for ${entity}`);
-  lines.push("");
-  lines.push(`**All ${allPosts.length} posts**`);
-  lines.push("");
-  
-  for (let i = 0; i < sortedPosts.length; i += 10) {
-    const pagePosts = sortedPosts.slice(i, i + 10);
-    lines.push(renderPostsTable(pagePosts, i));
-    lines.push("");
-  }
-  
-  const message = lines.join("\n").trim();
-  
-  return { message, allPosts: sortedPosts };
+  return { message: "Additional Instagram posts are ready to display.", allPosts: sortedPosts };
 }

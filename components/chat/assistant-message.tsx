@@ -9,6 +9,7 @@ import { AnalysisSection, ClaimList, ConfidenceBadge } from "./analysis-parts";
 import { MessageActions } from "./message-actions";
 import { SourceList, SourceCard } from "./source-card";
 import { MarkdownContent } from "./markdown-content";
+import { InstagramResults } from "./instagram-results";
 import { useState } from "react";
 
 function PostCountResults({ sources }: { sources: ResearchResult[] }) {
@@ -127,6 +128,21 @@ export function AssistantMessage({
   const analysis = message.analysis;
 
   const isPostCount = message.meta?.intentKind === "post_count";
+  const instagramResults = message.meta?.instagramResults;
+
+  if (instagramResults) {
+    return (
+      <div className="space-y-4">
+        {message.content.trim() ? (
+          <MarkdownContent content={message.content} className="mt-2 text-sm" />
+        ) : analysis ? (
+          <p className="text-sm leading-relaxed">{analysis.executiveSummary}</p>
+        ) : null}
+        <InstagramResults data={instagramResults} />
+        {actions}
+      </div>
+    );
+  }
 
   if (!analysis) {
     return (

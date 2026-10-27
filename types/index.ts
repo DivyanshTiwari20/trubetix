@@ -19,6 +19,7 @@ import type {
 } from "@/lib/validation/chat";
 import type {
   dateRangeSchema,
+  instagramResultsViewSchema,
   integrationStatusSchema,
   platformSchema,
   researchIntentSchema,
@@ -51,3 +52,4 @@ export type ResearchIntent = z.infer<typeof researchIntentSchema>;
 export type SourceType = z.infer<typeof sourceTypeSchema>;
 export type Platform = z.infer<typeof platformSchema>;
 export type IntegrationStatus = z.infer<typeof integrationStatusSchema>;
+export type InstagramResultsView = z.infer<typeof instagramResultsViewSchema>;

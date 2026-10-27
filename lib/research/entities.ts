@@ -343,7 +343,7 @@ const CLARIFY_HANDLE =
 // Words that describe residual question vocabulary, not the researched
 // subject. A keyword fallback must never become "posts" or "content".
 const SUBJECT_FALLBACK_NOISE = new Set([
-  "news","posts","posted","posting","content","both","say","read","see","look","going","going",
+  "news","posts","post","posted","posting","content","both","say","read","see","look","going","total","number","numbers","count","counts","many","done",
 ]);
 
 export function extractEntities(
