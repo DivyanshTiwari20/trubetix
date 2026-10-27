@@ -103,7 +103,7 @@ function instagramProfile(username: string): InstagramProfile {
 }
 
 function resultFor(query: ProviderQuery): RawProviderResult {
-  const from = new Date(query.dateRange.from).getTime();
+  const from = new Date(query.dateRange!.from).getTime();
   const slug = query.query.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   return {
     title: `Acme Corp update ${slug}`,

@@ -3,7 +3,7 @@ import type { Platform, ResolvedDateRange, SourceType } from "@/types";
 export interface ProviderQuery {
   query: string;
   numResults: number;
-  dateRange: ResolvedDateRange;
+  dateRange: ResolvedDateRange | null;
   newsOnly?: boolean;
   /**
    * Number of result pages to fetch for this query (SerpAPI `start` offsets).

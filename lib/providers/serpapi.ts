@@ -155,7 +155,7 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<Sea
           hl: "en",
           gl: "us",
           google_domain: "google.com",
-          tbs: toSerpApiTbsApp(query.dateRange),
+          tbs: query.dateRange ? toSerpApiTbsApp(query.dateRange) : "",
           start: String(start),
         });
         if (query.newsOnly) params.set("tbm", "nws");

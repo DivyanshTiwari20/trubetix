@@ -49,7 +49,7 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
           <Row label="Posts shown" value={results.posts.length.toLocaleString("en-US")} />
         </dl>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Google's estimate is approximate, not an Instagram-wide post count.
+          Google&apos;s estimate is approximate, not an Instagram-wide post count.
         </p>
       </div>
     );

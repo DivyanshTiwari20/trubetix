@@ -23,6 +23,13 @@ function available(value: string | null | undefined): string {
   return value?.trim() ? value : "Unavailable";
 }
 
+function formatEstimate(value: string | null | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return "Unavailable";
+  const numeric = Number(trimmed.replace(/,/g, ""));
+  return Number.isFinite(numeric) ? numeric.toLocaleString("en-US") : trimmed;
+}
+
 function safeInstagramUrl(value: string): string | null {
   try {
     const url = new URL(value);
@@ -102,7 +109,7 @@ function PreviewField({ label, text }: { label: string; text: string }) {
 }
 
 export function InstagramResults({ data }: { data: InstagramResultsView }) {
-  const estimate = available(data.googleEstimatedResults);
+  const estimate = formatEstimate(data.googleEstimatedResults);
 
   return (
     <section className="space-y-4" aria-label={`Instagram results for ${data.entity}`}>
@@ -128,7 +135,7 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
       </div>
 
       <p className="text-xs leading-relaxed text-muted-foreground">
-        Google's estimate is approximate and is not an Instagram-wide post count.
+        Google&apos;s estimate is approximate and is not an Instagram-wide post count.
       </p>
 
       <Card className="overflow-hidden shadow-sm">

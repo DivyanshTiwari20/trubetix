@@ -520,28 +520,68 @@ async function searchInstagramPosts(
 
   if (estimateQuery && estimateNumResults !== null) {
     try {
+      // Google often omits the "About N results" count when a time filter
+      // (cdr:) is applied, so run the estimate without it. The date window
+      // still scopes the posts retrieved below via query-level after:/before:.
       const estimateResponse = await provider.searchWithInfo(
         {
           query: estimateQuery,
           numResults: estimateNumResults,
-          dateRange: estimateProviderDateRange,
+          dateRange: null,
           fetchAllPages: false,
           newsOnly: false,
         },
         { signal },
       );
-      const providerTotalResults = estimateResponse.searchInformation?.total_results;
+      let providerTotalResults = estimateResponse.searchInformation?.total_results;
       estimateProvenance = {
         query: estimateQuery,
         queryDisplayed: estimateResponse.searchInformation?.query_displayed ?? null,
         parameters: estimateResponse.requestParameters ?? {},
         totalResults: providerTotalResults ?? null,
       };
+      if (providerTotalResults === undefined || providerTotalResults === null) {
+        estimateError = "SerpAPI omitted search_information.total_results.";
+      } else {
+        estimateError = null;
+      }
+
+      // Fallback: an all-Instagram entity query (e.g. "Instagram Nike posts")
+      // usually still carries a total result count even when the site: query
+      // does not.
+      if ((providerTotalResults === undefined || providerTotalResults === null) && estimateEntity) {
+        try {
+          const fallbackResponse = await provider.searchWithInfo(
+            {
+              query: `Instagram ${estimateEntity} posts`,
+              numResults: 10,
+              dateRange: null,
+              fetchAllPages: false,
+              newsOnly: false,
+            },
+            { signal },
+          );
+          const fallbackTotal = fallbackResponse.searchInformation?.total_results;
+          if (fallbackTotal !== undefined && fallbackTotal !== null) {
+            providerTotalResults = fallbackTotal;
+            estimateProvenance = {
+              query: `Instagram ${estimateEntity} posts`,
+              queryDisplayed: fallbackResponse.searchInformation?.query_displayed ?? null,
+              parameters: fallbackResponse.requestParameters ?? {},
+              totalResults: fallbackTotal,
+            };
+            estimateError = null;
+          }
+        } catch (fallbackError) {
+          logger.warn("Instagram Google fallback estimate query failed", {
+            error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+          });
+        }
+      }
+
       if (providerTotalResults !== undefined && providerTotalResults !== null) {
         googleEstimate = providerTotalResults;
         estimateProviderTotalResults = providerTotalResults;
-      } else {
-        estimateError = "SerpAPI omitted search_information.total_results.";
       }
     } catch (error) {
       estimateError = error instanceof Error ? error.message : String(error);

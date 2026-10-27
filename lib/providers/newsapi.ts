@@ -1,6 +1,5 @@
 import "server-only";
 import { fetchJson } from "@/lib/http";
-import { toDateOnly } from "@/lib/research/dates";
 import type { ProviderHttpOptions } from "./serpapi";
 import type { RawProviderResult, SearchProvider } from "./types";
 
@@ -29,14 +28,13 @@ export function createNewsApiProvider(options: NewsApiProviderOptions): SearchPr
     capabilities: ["news"],
     isConfigured: () => options.apiKey.trim().length > 0,
     async search(query, { signal } = {}) {
+      if (!query.dateRange) throw new Error("NewsAPI requires a date range");
       const params = new URLSearchParams({
         q: query.query,
         language: "en",
         sortBy: "publishedAt",
         pageSize: String(Math.min(query.numResults, 100)),
         apiKey: options.apiKey,
-        from: toDateOnly(query.dateRange.from),
-        to: toDateOnly(query.dateRange.to),
       });
 
       const url = `https://newsapi.org/v2/everything?${params.toString()}`;
