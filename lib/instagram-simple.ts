@@ -91,7 +91,8 @@ function sameEntityText(left: string, right: string): boolean {
 async function extractEntityWithGemini(
   question: string,
   userHistory: string[],
-  gemini: GeminiClient
+  gemini: GeminiClient,
+  signal?: AbortSignal
 ): Promise<EntityExtractionResult> {
   const priorMessages = userHistory.filter((message) => message.trim() !== question.trim()).slice(-6);
   const prompt = `Current user message (use this first):\n${question}\n\nPrior user messages for follow-up context only:\n${priorMessages.map((m, i) => `${i + 1}. ${m}`).join("\n") || "(none)"}`;
@@ -101,6 +102,7 @@ async function extractEntityWithGemini(
     userContent: prompt,
     responseSchema: entityExtractionGeminiSchema,
     temperature: 0,
+    signal,
   });
 
   const parsed = entityExtractionSchema.safeParse(response);
@@ -627,7 +629,14 @@ async function searchInstagramPosts(
   let pagesFetched = 0;
   let lastError: string | null = null;
 
+  // Keep the whole request bounded: one page per dork and a shared search
+  // budget, stopping as soon as enough unique posts are collected.
+  const maxSearches = Math.max(1, config.maxSerpApiSearches);
+  let searchesRemaining = maxSearches;
+  const targetPosts = Math.max(10, config.maxResultsPerQuery);
+
   for (const { entity, query } of queryVariations) {
+    if (searchesRemaining <= 0) break;
     queriesTried.push(query);
     logger.info("Instagram simple query", { query, entity, rangeLabel });
 
@@ -638,7 +647,7 @@ async function searchInstagramPosts(
           query,
           numResults: config.maxResultsPerQuery,
           dateRange: estimateDateRange,
-          fetchAllPages: true,
+          pages: 1,
           newsOnly: false,
         },
         { signal },
@@ -655,6 +664,7 @@ async function searchInstagramPosts(
       paginationErrors.push(`${query}: ${lastError}`);
       continue;
     }
+    searchesRemaining -= Math.max(1, result.pagesFetched);
     rawOrganicResultsFetched += result.rawOrganicResults.length;
     pagesFetched += result.pagesFetched;
     if (result.pageLimitReached) queriesAtPageLimit.push(query);
@@ -669,6 +679,8 @@ async function searchInstagramPosts(
       seenPostShortcodes.add(postShortcode);
       allPosts.push({ ...normalized, url: canonicalUrl });
     }
+
+    if (allPosts.length >= targetPosts) break;
   }
 
   return {
@@ -714,7 +726,7 @@ async function fetchMorePosts(
       query,
       numResults: config.maxResultsPerQuery,
       dateRange: { from: rangeFrom, to: rangeTo, label: "", timezone: "UTC", preset: null },
-      fetchAllPages: true,
+      pages: config.maxGooglePages,
       newsOnly: false,
     },
     { signal },
@@ -759,7 +771,8 @@ const analysisSchema = z.object({
 
 async function analyzeWithGemini(
   input: GeminiAnalysisInput,
-  gemini: GeminiClient
+  gemini: GeminiClient,
+  signal?: AbortSignal
 ): Promise<string> {
   const postsText = input.posts.map((p, i) =>
     `${i + 1}. ${p.title} | @${p.account} | ${p.date ?? "no date"} | ${p.likes ?? "no likes"} | ${p.snippet}`
@@ -792,6 +805,7 @@ Never state allegations as facts. Never invent facts not in the posts.`;
     userContent: prompt,
     responseSchema: toGeminiSchema(analysisSchema),
     temperature: 0,
+    signal,
   });
 
   const parsed = analysisSchema.safeParse(response);
@@ -802,7 +816,11 @@ Never state allegations as facts. Never invent facts not in the posts.`;
   return parsed.data.answer;
 }
 
-async function chatWithGemini(message: string, gemini: GeminiClient): Promise<string> {
+async function chatWithGemini(
+  message: string,
+  gemini: GeminiClient,
+  signal?: AbortSignal
+): Promise<string> {
   const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian short sentences, warm but direct, no corporate words, no emoji (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Keep it to 1-3 lines.`;
   
   const schema = z.object({ answer: z.string() });
@@ -812,6 +830,7 @@ async function chatWithGemini(message: string, gemini: GeminiClient): Promise<st
     userContent: message,
     responseSchema: toGeminiSchema(schema),
     temperature: 0.7,
+    signal,
   });
   
   const parsed = schema.safeParse(response);
@@ -879,7 +898,7 @@ export async function runSimpleInstagramResearch(
   let entity: string | null = extractExplicitEntity(question);
   let intent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` = "narrative";
   try {
-    const extraction = await extractEntityWithGemini(question, history, gemini);
+    const extraction = await extractEntityWithGemini(question, history, gemini, signal);
     entity = entity ?? extraction.entity;
     intent = extraction.intent;
   } catch (error) {
@@ -897,11 +916,19 @@ export async function runSimpleInstagramResearch(
   }
 
   if (intent === "chat") {
-    const reply = await chatWithGemini(question, gemini);
-    return {
-      message: reply,
-      meta: { ...emptyMeta, status: "ok", intent: "overview", integrations: { gemini: { configured: true, model: "gemini-1.5-flash" }, serpapi: { configured: true }, newsapi: { configured: false } } }
-    };
+    try {
+      const reply = await chatWithGemini(question, gemini, signal);
+      return {
+        message: reply,
+        meta: { ...emptyMeta, status: "ok", intent: "overview", integrations: { gemini: { configured: true, model: "gemini-1.5-flash" }, serpapi: { configured: true }, newsapi: { configured: false } } }
+      };
+    } catch (error) {
+      logger.warn("Simple Instagram chat failed", { error: error instanceof Error ? error.message : "unknown" });
+      return {
+        message: "Hey! Want to check Instagram buzz for someone?",
+        meta: { ...emptyMeta, limitations: ["AI chat failed"] }
+      };
+    }
   }
 
   if (!entity) {
@@ -967,7 +994,7 @@ export async function runSimpleInstagramResearch(
         const businessType = businessMatch ? businessMatch[1].trim() : "business";
         analysisIntent = `business_fit:${businessType}`;
       }
-      message = await analyzeWithGemini({ posts: postsForGemini, intent: analysisIntent, entity }, gemini);
+      message = await analyzeWithGemini({ posts: postsForGemini, intent: analysisIntent, entity }, gemini, signal);
     } catch (error) {
       logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
     }

@@ -17,6 +17,8 @@ import { runSimpleInstagramResearch } from "@/lib/instagram-simple";
 import { chatRequestSchema, chatResponseSchema } from "@/lib/validation";
 import type { ChatMessage } from "@/types";
 
+const SIMPLE_RESEARCH_TIMEOUT_MS = 30_000;
+
 function errorResponse(code: string, message: string, status: number, details?: string[]) {
   return NextResponse.json({ error: { code, message, ...(details ? { details } : {}) } }, { status });
 }
@@ -152,36 +154,73 @@ export async function POST(request: Request): Promise<Response> {
       : null;
 
     const userHistory = getUserHistory(parsed.data.history);
-    const outcome = await runSimpleInstagramResearch(
-      message,
-      userHistory,
-      parsed.data.dateRange?.from ?? null,
-      parsed.data.dateRange?.to ?? null,
-      parsed.data.dateRange?.preset ?? null,
-      gemini,
-      request.signal
+    const controller = new AbortController();
+    const abortOnRequest = () => controller.abort(request.signal.reason);
+    if (request.signal.aborted) controller.abort(request.signal.reason);
+    else request.signal.addEventListener("abort", abortOnRequest, { once: true });
+    const deadline = setTimeout(
+      () => controller.abort(new Error("Instagram research timed out")),
+      SIMPLE_RESEARCH_TIMEOUT_MS,
     );
 
-    const messageObj: ChatMessage = {
-      id: createId("msg"),
-      role: "assistant",
-      content: outcome.message,
-      createdAt: new Date().toISOString(),
-      status: "complete",
-      analysis: null,
-      sources: [],
-      meta: outcome.meta,
-      error: null,
-      feedback: null,
-    };
+    try {
+      const outcome = await runSimpleInstagramResearch(
+        message,
+        userHistory,
+        parsed.data.dateRange?.from ?? null,
+        parsed.data.dateRange?.to ?? null,
+        parsed.data.dateRange?.preset ?? null,
+        gemini,
+        controller.signal
+      );
 
-    const payload = chatResponseSchema.parse({
-      conversationId,
-      message: messageObj,
-    });
+      const messageObj: ChatMessage = {
+        id: createId("msg"),
+        role: "assistant",
+        content: outcome.message,
+        createdAt: new Date().toISOString(),
+        status: "complete",
+        analysis: null,
+        sources: [],
+        meta: outcome.meta,
+        error: null,
+        feedback: null,
+      };
 
-    logger.info("Chat request completed (simple Instagram)", { requestId, conversationId, totalElapsedMs: Date.now() - requestStart });
-    return NextResponse.json(payload);
+      const payload = chatResponseSchema.parse({
+        conversationId,
+        message: messageObj,
+      });
+
+      logger.info("Chat request completed (simple Instagram)", { requestId, conversationId, totalElapsedMs: Date.now() - requestStart });
+      return NextResponse.json(payload);
+    } catch (error) {
+      logger.error("Simple Instagram research failed", {
+        requestId,
+        conversationId,
+        message: error instanceof Error ? error.message : "unknown",
+        elapsedMs: Date.now() - requestStart,
+      });
+      const messageObj: ChatMessage = {
+        id: createId("msg"),
+        role: "assistant",
+        content:
+          "Instagram research took too long or failed. Please try a narrower question or date range.",
+        createdAt: new Date().toISOString(),
+        status: "degraded",
+        analysis: null,
+        sources: [],
+        meta: null,
+        error: error instanceof Error ? error.message : null,
+        feedback: null,
+      };
+      return NextResponse.json(
+        chatResponseSchema.parse({ conversationId, message: messageObj }),
+      );
+    } finally {
+      clearTimeout(deadline);
+      request.signal.removeEventListener("abort", abortOnRequest);
+    }
   }
 
   logger.info("Creating providers", { requestId, conversationId, geminiConfigured: !!geminiConfig });
