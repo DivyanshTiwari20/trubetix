@@ -2,6 +2,7 @@
 
 import { ExternalLink } from "lucide-react";
 import type { InstagramResultsView } from "@/types";
+import { formatCompactCount } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -24,10 +25,7 @@ function available(value: string | null | undefined): string {
 }
 
 function formatEstimate(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed) return "Unavailable";
-  const numeric = Number(trimmed.replace(/,/g, ""));
-  return Number.isFinite(numeric) ? numeric.toLocaleString("en-US") : trimmed;
+  return formatCompactCount(value) || "Unavailable";
 }
 
 function safeInstagramUrl(value: string): string | null {

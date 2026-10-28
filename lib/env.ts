@@ -13,6 +13,7 @@ export interface ResearchConfig {
   maxInstagramProfiles: number;
   maxGooglePages: number;
   maxSerpApiSearches: number;
+  researchTimeoutMs: number;
   timeoutMs: number;
   maxRetries: number;
   temperature: number;
@@ -89,6 +90,12 @@ export function getResearchConfig(): ResearchConfig {
       RESEARCH_DEFAULTS.maxSerpApiSearches,
       1,
       30,
+    ),
+    researchTimeoutMs: readInt(
+      "TUBITEX_RESEARCH_TIMEOUT_MS",
+      RESEARCH_DEFAULTS.researchTimeoutMs,
+      5_000,
+      180_000,
     ),
     timeoutMs: readInt("TUBITEX_TIMEOUT_MS", RESEARCH_DEFAULTS.timeoutMs, 1_000, 180_000),
     maxRetries: readInt("TUBITEX_MAX_RETRIES", RESEARCH_DEFAULTS.maxRetries, 0, 5),

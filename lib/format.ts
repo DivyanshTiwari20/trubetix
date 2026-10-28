@@ -72,3 +72,15 @@ export function groupForTimestamp(iso: string, now: number = Date.now()): Conver
 export function pluralize(count: number, singular: string, plural?: string): string {
   return count === 1 ? singular : (plural ?? `${singular}s`);
 }
+
+export function formatCompactCount(value: number | string | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "string" ? value.trim() : "";
+  if (typeof value === "string" && !text) return "";
+  const numeric = typeof value === "number" ? value : Number(text.replace(/,/g, ""));
+  if (!Number.isFinite(numeric)) return text;
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 2,
+  }).format(numeric);
+}

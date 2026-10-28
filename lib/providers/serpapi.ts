@@ -233,8 +233,8 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<Sea
             seenPageLinks.add(item.link);
             return count + 1;
           }, 0);
-          // A short or non-progressing page means the provider has exhausted this query.
-          if (rawPageResults.length < query.numResults || newLinks === 0) break;
+          if (rawPageResults.length === 0) break;
+          if (query.fetchAllPages && newLinks === 0) break;
         }
         if (query.newsOnly && pageResults.length === 0) break;
       }
@@ -247,7 +247,7 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<Sea
         requestParameters,
         pagesFetched,
         pagesRequested: Number.isFinite(maxPages) ? maxPages : null,
-        pageLimitReached: !query.newsOnly && Number.isFinite(maxPages) && pagesFetched === maxPages && lastPageResultCount >= query.numResults,
+        pageLimitReached: !query.newsOnly && Number.isFinite(maxPages) && pagesFetched === maxPages && lastPageResultCount > 0,
         paginationError,
       };
     },

@@ -383,16 +383,19 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
     .filter(([key]) => /comments?/i.test(key))
     .map(([, value]) => String(value));
   const extensionValues = (raw.extensions ?? []).map(String);
+  const displayedLinkValues = displayedLink ? [displayedLink] : [];
 
   const likesMetric = uniqueMetricFromValues(
     raw.likes !== undefined ? [raw.likes] : [], "likes", true,
   ) ?? uniqueMetricFromValues(detectedLikes, "likes", true)
     ?? uniqueMetricFromValues(extensionValues, "likes", false)
+    ?? uniqueMetricFromValues(displayedLinkValues, "likes", false)
     ?? (snippet ? parseEngagementMetric(snippet, "likes", false) : null);
   const commentsMetric = uniqueMetricFromValues(
     raw.comments !== undefined ? [raw.comments] : [], "comments", true,
   ) ?? uniqueMetricFromValues(detectedComments, "comments", true)
     ?? uniqueMetricFromValues(extensionValues, "comments", false)
+    ?? uniqueMetricFromValues(displayedLinkValues, "comments", false)
     ?? (snippet ? parseEngagementMetric(snippet, "comments", false) : null);
 
   const likesText = likesMetric?.text ?? null;
@@ -629,16 +632,15 @@ async function searchInstagramPosts(
   let pagesFetched = 0;
   let lastError: string | null = null;
 
-  // Keep the whole request bounded: one page per dork and a shared search
-  // budget, stopping as soon as enough unique posts are collected.
   const maxSearches = Math.max(1, config.maxSerpApiSearches);
   let searchesRemaining = maxSearches;
-  const targetPosts = Math.max(10, config.maxResultsPerQuery);
+  const maxPagesPerQuery = Math.max(1, config.maxGooglePages);
 
   for (const { entity, query } of queryVariations) {
     if (searchesRemaining <= 0) break;
+    const pages = Math.min(maxPagesPerQuery, searchesRemaining);
     queriesTried.push(query);
-    logger.info("Instagram simple query", { query, entity, rangeLabel });
+    logger.info("Instagram simple query", { query, entity, rangeLabel, pages });
 
     let result: SerpApiSearchResult;
     try {
@@ -647,7 +649,7 @@ async function searchInstagramPosts(
           query,
           numResults: config.maxResultsPerQuery,
           dateRange: estimateDateRange,
-          pages: 1,
+          pages,
           newsOnly: false,
         },
         { signal },
@@ -679,8 +681,6 @@ async function searchInstagramPosts(
       seenPostShortcodes.add(postShortcode);
       allPosts.push({ ...normalized, url: canonicalUrl });
     }
-
-    if (allPosts.length >= targetPosts) break;
   }
 
   return {

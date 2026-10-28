@@ -17,8 +17,6 @@ import { runSimpleInstagramResearch } from "@/lib/instagram-simple";
 import { chatRequestSchema, chatResponseSchema } from "@/lib/validation";
 import type { ChatMessage } from "@/types";
 
-const SIMPLE_RESEARCH_TIMEOUT_MS = 30_000;
-
 function errorResponse(code: string, message: string, status: number, details?: string[]) {
   return NextResponse.json({ error: { code, message, ...(details ? { details } : {}) } }, { status });
 }
@@ -160,7 +158,7 @@ export async function POST(request: Request): Promise<Response> {
     else request.signal.addEventListener("abort", abortOnRequest, { once: true });
     const deadline = setTimeout(
       () => controller.abort(new Error("Instagram research timed out")),
-      SIMPLE_RESEARCH_TIMEOUT_MS,
+      config.researchTimeoutMs,
     );
 
     try {

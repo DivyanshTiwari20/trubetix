@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { SOURCE_TYPE_LABELS } from "@/lib/config";
-import { formatDateTime } from "@/lib/format";
+import { formatCompactCount, formatDateTime } from "@/lib/format";
 import type { ResearchMeta } from "@/types";
 
 const STATUS_VARIANT: Record<ResearchMeta["status"], "success" | "warning" | "destructive"> = {
@@ -45,7 +45,10 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
         <dl>
           <Row label="Entity" value={results.entity} />
           <Row label="Date range" value={results.dateRangeLabel} />
-          <Row label="Google estimated results" value={results.googleEstimatedResults ?? "Unavailable"} />
+          <Row
+            label="Google estimated results"
+            value={formatCompactCount(results.googleEstimatedResults) || "Unavailable"}
+          />
           <Row label="Posts shown" value={results.posts.length.toLocaleString("en-US")} />
         </dl>
         <p className="text-[11px] leading-relaxed text-muted-foreground">

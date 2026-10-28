@@ -18,6 +18,7 @@ export const RESEARCH_DEFAULTS = {
   maxInstagramProfiles: 3,
   maxGooglePages: 5,
   maxSerpApiSearches: 15,
+  researchTimeoutMs: 60_000,
   timeoutMs: 120_000,
   maxRetries: 2,
   temperature: 0.3,

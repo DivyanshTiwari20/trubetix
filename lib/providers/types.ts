@@ -7,8 +7,8 @@ export interface ProviderQuery {
   newsOnly?: boolean;
   /**
    * Number of result pages to fetch for this query (SerpAPI `start` offsets).
-   * Providers stop early when a page comes back short or empty, so this is a
-   * ceiling on pagination spend rather than a guaranteed request count.
+   * Providers stop early when a page comes back empty (or stops progressing
+   * when `fetchAllPages` is set), so this is a ceiling on pagination spend.
    */
   pages?: number;
   /** Fetch until the provider exhausts this query instead of using a page-count ceiling. */
