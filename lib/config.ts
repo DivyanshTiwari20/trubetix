@@ -16,7 +16,7 @@ export const RESEARCH_DEFAULTS = {
   maxEvidence: 24,
   maxInstagramQueries: 6,
   maxInstagramProfiles: 3,
-  maxGooglePages: 5,
+  maxGooglePages: 10,
   maxSerpApiSearches: 15,
   researchTimeoutMs: 60_000,
   timeoutMs: 120_000,
@@ -31,6 +31,7 @@ export const STORAGE_KEYS = {
   sidebarCollapsed: "tubitex.sidebarCollapsed.v1",
   researchPanel: "tubitex.researchPanel.v1",
   datePreset: "tubitex.datePreset.v1",
+  searchMode: "tubitex.searchMode.v1",
 } as const;
 
 export const EXAMPLE_PROMPTS = [

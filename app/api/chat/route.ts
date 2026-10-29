@@ -14,6 +14,7 @@ import { createInstagramProfileProvider, createSearchProviders } from "@/lib/pro
 import { checkRateLimit } from "@/lib/rate-limit";
 import { runResearch } from "@/lib/research/pipeline";
 import { runSimpleInstagramResearch } from "@/lib/instagram-simple";
+import { runApifyInstagramResearch } from "@/lib/instagram-apify";
 import { chatRequestSchema, chatResponseSchema } from "@/lib/validation";
 import type { ChatMessage } from "@/types";
 
@@ -40,31 +41,43 @@ function isSimpleGreeting(message: string): boolean {
   );
 }
 
-function isInstagramSocialQuestion(message: string): boolean {
+function hasInstagramKeyword(message: string): boolean {
   const normalized = message.toLowerCase();
   const instagramKeywords = [
-    "instagram", "insta", "ig", "reel", "reels", "post", "posts", 
-    "@", "hashtag", "#", "follower", "following", "profile", "account"
+    "instagram", "insta", "ig", "reel", "reels", "post", "posts",
+    "@", "hashtag", "#", "follower", "following", "profile", "account",
+    "comment", "comments", "like", "likes", "engagement",
   ];
-  if (instagramKeywords.some(keyword => normalized.includes(keyword))) return true;
-  
+  return instagramKeywords.some((keyword) => normalized.includes(keyword));
+}
+
+function isInstagramSocialQuestion(
+  message: string,
+  history: Array<{ role: string; content: string }> = [],
+): boolean {
+  const normalized = message.toLowerCase();
+  if (hasInstagramKeyword(message)) return true;
+
   // Default to Instagram for person/brand/hashtag queries when no other platform is mentioned
-  const otherPlatformKeywords = ["news", "twitter", "x.com", "reddit", "web", "article", "report"];
+  const otherPlatformKeywords = [
+    "news", "twitter", "x.com", "reddit", "web", "article", "report",
+    "youtube", "facebook", "tiktok", "linkedin", "threads",
+  ];
   if (otherPlatformKeywords.some(k => normalized.includes(k))) return false;
-  
+
+  // Keep follow-ups in the Instagram flow when the conversation was about Instagram.
+  const hadInstagramContext = history.some((turn) => hasInstagramKeyword(turn.content));
+  if (hadInstagramContext) return true;
+
   // Heuristic: looks like a name/brand query (capitalized words, not a question word)
   const questionWords = ["what", "who", "when", "where", "why", "how", "which", "can", "could", "would", "should", "is", "are", "do", "does", "did", "will", "show", "give", "tell"];
   const startsWithQuestionWord = questionWords.some(q => normalized.startsWith(q + " "));
   if (startsWithQuestionWord) return false;
-  
+
   // If it looks like a name (multiple capitalized words or single word > 2 chars)
   const words = message.trim().split(/\s+/);
   const looksLikeName = words.length >= 1 && words.some(w => w.length > 2 && /^[A-Z]/.test(w));
   return looksLikeName;
-}
-
-function getUserHistory(history: Array<{ role: string; content: string }>): string[] {
-  return history.filter(t => t.role === "user").map(t => t.content);
 }
 
 async function lightweightResponse(message: string, conversationId: string): Promise<Response> {
@@ -130,8 +143,8 @@ export async function POST(request: Request): Promise<Response> {
   const message = parsed.data.message;
   const conversationId = parsed.data.conversationId ?? createId("conv");
   
-  // Fast path for simple greetings - no research needed
-  if (isSimpleGreeting(message)) {
+  // Fast path for simple greetings with no conversation context.
+  if (isSimpleGreeting(message) && parsed.data.history.length === 0) {
     return lightweightResponse(message, conversationId);
   }
 
@@ -140,8 +153,81 @@ export async function POST(request: Request): Promise<Response> {
   const integrations = getIntegrationStatus();
   const geminiConfig = getGeminiConfig();
 
+  // Deep thinking is an explicit Apify-only path. It never falls through to Google/SerpAPI.
+  if (parsed.data.searchMode === "deep") {
+    const gemini = geminiConfig
+      ? createGeminiClient(geminiConfig, {
+          timeoutMs: config.timeoutMs,
+          maxRetries: config.maxRetries,
+          temperature: geminiConfig.temperature,
+        })
+      : null;
+    const controller = new AbortController();
+    const abortOnRequest = () => controller.abort(request.signal.reason);
+    if (request.signal.aborted) controller.abort(request.signal.reason);
+    else request.signal.addEventListener("abort", abortOnRequest, { once: true });
+    const deadline = setTimeout(
+      () => controller.abort(new Error("Deep Instagram research timed out")),
+      config.researchTimeoutMs,
+    );
+
+    try {
+      const outcome = await runApifyInstagramResearch(
+        message,
+        parsed.data.history,
+        parsed.data.dateRange?.from ?? null,
+        parsed.data.dateRange?.to ?? null,
+        parsed.data.dateRange?.preset ?? null,
+        gemini,
+        controller.signal,
+      );
+      const messageObj: ChatMessage = {
+        id: createId("msg"),
+        role: "assistant",
+        content: outcome.message,
+        createdAt: new Date().toISOString(),
+        status: outcome.status,
+        analysis: null,
+        sources: [],
+        meta: outcome.meta,
+        error: null,
+        feedback: null,
+      };
+      const payload = chatResponseSchema.parse({ conversationId, message: messageObj });
+      logger.info("Chat request completed (Deep thinking)", {
+        requestId,
+        conversationId,
+        status: outcome.status,
+        totalElapsedMs: Date.now() - requestStart,
+      });
+      return NextResponse.json(payload);
+    } catch (error) {
+      logger.error("Deep Instagram research failed", {
+        requestId,
+        conversationId,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+      const messageObj: ChatMessage = {
+        id: createId("msg"),
+        role: "assistant",
+        content: "Deep thinking could not complete this Instagram search. Please check the Apify/Gemini setup and try again; Google/SerpAPI was not used as a fallback.",
+        createdAt: new Date().toISOString(),
+        status: "degraded",
+        analysis: null,
+        sources: [],
+        meta: null,
+        error: "Deep thinking request failed without a provider fallback.",
+        feedback: null,
+      };
+      return NextResponse.json(chatResponseSchema.parse({ conversationId, message: messageObj }));
+    } finally {
+      clearTimeout(deadline);
+      request.signal.removeEventListener("abort", abortOnRequest);
+    }
+  }
+
   // Route Instagram/social questions to new simple handler when flag is enabled
-  if (config.instagramSimple && isInstagramSocialQuestion(message)) {
+  if (config.instagramSimple && isInstagramSocialQuestion(message, parsed.data.history)) {
     logger.info("Routing to simple Instagram handler", { requestId, conversationId });
     const gemini = geminiConfig
       ? createGeminiClient(geminiConfig, {
@@ -151,7 +237,6 @@ export async function POST(request: Request): Promise<Response> {
         })
       : null;
 
-    const userHistory = getUserHistory(parsed.data.history);
     const controller = new AbortController();
     const abortOnRequest = () => controller.abort(request.signal.reason);
     if (request.signal.aborted) controller.abort(request.signal.reason);
@@ -164,7 +249,7 @@ export async function POST(request: Request): Promise<Response> {
     try {
       const outcome = await runSimpleInstagramResearch(
         message,
-        userHistory,
+        parsed.data.history,
         parsed.data.dateRange?.from ?? null,
         parsed.data.dateRange?.to ?? null,
         parsed.data.dateRange?.preset ?? null,
@@ -203,7 +288,7 @@ export async function POST(request: Request): Promise<Response> {
         id: createId("msg"),
         role: "assistant",
         content:
-          "Instagram research took too long or failed. Please try a narrower question or date range.",
+          "Instagram research took too long or failed. Want to try a narrower question or date range?",
         createdAt: new Date().toISOString(),
         status: "degraded",
         analysis: null,

@@ -45,14 +45,19 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
         <dl>
           <Row label="Entity" value={results.entity} />
           <Row label="Date range" value={results.dateRangeLabel} />
-          <Row
-            label="Google estimated results"
-            value={formatCompactCount(results.googleEstimatedResults) || "Unavailable"}
-          />
+          <Row label="Retrieval source" value={results.retrievalSource === "apify" ? "Apify keyword/hashtag search" : "Google dorking / SerpAPI"} />
+          {results.retrievalSource === "apify" ? null : (
+            <Row
+              label="Google estimated results"
+              value={formatCompactCount(results.googleEstimatedResults) || "Unavailable"}
+            />
+          )}
           <Row label="Posts shown" value={results.posts.length.toLocaleString("en-US")} />
         </dl>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Google&apos;s estimate is approximate, not an Instagram-wide post count.
+          {results.retrievalSource === "apify"
+            ? "Provider results are limited, locally date-filtered, and not an Instagram-wide count."
+            : "Google's estimate is approximate, not an Instagram-wide post count."}
         </p>
       </div>
     );
@@ -109,6 +114,11 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
           <Badge variant={meta.integrations.newsapi.configured ? "success" : "outline"}>
             NewsAPI: {integrationLabel(meta.integrations.newsapi.configured, "off")}
           </Badge>
+          {meta.integrations.apify ? (
+            <Badge variant={meta.integrations.apify.configured ? "success" : "warning"}>
+              Apify: {integrationLabel(meta.integrations.apify.configured, "off")}
+            </Badge>
+          ) : null}
         </div>
       </div>
 

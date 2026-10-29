@@ -41,11 +41,14 @@ export const dateRangeRequestSchema = z.object({
   to: z.string().optional(),
 });
 
+export const searchModeSchema = z.enum(["google", "deep"]);
+
 export const chatRequestSchema = z.object({
   message: z.string().trim().min(1).max(LIMITS.questionMaxLength),
   conversationId: z.string().optional(),
   history: z.array(historyTurnSchema).max(LIMITS.maxHistoryMessages).default([]),
   dateRange: dateRangeRequestSchema.optional(),
+  searchMode: searchModeSchema.optional(),
 });
 
 export const chatResponseSchema = z.object({

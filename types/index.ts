@@ -16,6 +16,7 @@ import type {
   historyTurnSchema,
   messageRoleSchema,
   messageStatusSchema,
+  searchModeSchema,
 } from "@/lib/validation/chat";
 import type {
   dateRangeSchema,
@@ -44,6 +45,7 @@ export type Feedback = z.infer<typeof feedbackSchema>;
 export type HistoryTurn = z.infer<typeof historyTurnSchema>;
 export type DateRangeRequest = z.infer<typeof dateRangeRequestSchema>;
 export type DatePreset = NonNullable<DateRangeRequest["preset"]>;
+export type SearchMode = z.infer<typeof searchModeSchema>;
 
 export type ResearchResult = z.infer<typeof researchResultSchema>;
 export type ResearchMeta = z.infer<typeof researchMetaSchema>;

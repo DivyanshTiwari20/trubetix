@@ -1,12 +1,19 @@
 "use client";
 
-import { ArrowUp, Ban } from "lucide-react";
+import { ArrowUp, Ban, BrainCircuit, Check, Search } from "lucide-react";
 import { useEffect, useRef, type RefObject } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { LIMITS } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { useChat } from "./chat-provider";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { DateRangeSelect } from "./date-range-select";
 
 export interface ChatComposerProps {
@@ -16,7 +23,15 @@ export interface ChatComposerProps {
 }
 
 export function ChatComposer({ value, onChange, inputRef }: ChatComposerProps) {
-  const { sendMessage, isGenerating, stopGeneration, datePreset, setDatePreset } = useChat();
+  const {
+    sendMessage,
+    isGenerating,
+    stopGeneration,
+    datePreset,
+    setDatePreset,
+    searchMode,
+    setSearchMode,
+  } = useChat();
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = inputRef ?? internalRef;
 
@@ -68,7 +83,35 @@ export function ChatComposer({ value, onChange, inputRef }: ChatComposerProps) {
         className="max-h-[200px] min-h-[44px] resize-none border-0 bg-transparent px-2 py-2 shadow-none focus-visible:outline-none"
       />
       <div className="flex items-center justify-between gap-2 px-1 pb-0.5 pt-1">
-        <DateRangeSelect value={datePreset} onChange={setDatePreset} disabled={isGenerating} />
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          <DateRangeSelect value={datePreset} onChange={setDatePreset} disabled={isGenerating} />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={isGenerating}
+                className="gap-1.5 text-muted-foreground"
+                aria-label={`Search mode: ${searchMode === "deep" ? "Deep thinking with Apify" : "Google dorking with SerpAPI"}`}
+              >
+                {searchMode === "deep" ? <BrainCircuit className="size-3.5" /> : <Search className="size-3.5" />}
+                {searchMode === "deep" ? "Deep thinking" : "Google"}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuLabel>Instagram search mode</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={() => setSearchMode("google")}>
+                Google dorking · SerpAPI
+                {searchMode === "google" ? <Check className="ml-auto size-4" /> : null}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setSearchMode("deep")}>
+                Deep thinking · Apify
+                {searchMode === "deep" ? <Check className="ml-auto size-4" /> : null}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         <div className="flex items-center gap-2">
           {isGenerating ? (
             <Button type="button" variant="outline" size="sm" onClick={stopGeneration}>

@@ -177,6 +177,7 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<Sea
       let pagesFetched = 0;
       let requestParameters: Record<string, string> = {};
       let lastPageResultCount = 0;
+      let stoppedForNoProgress = false;
       let paginationError: string | null = null;
       const seenPageLinks = new Set<string>();
 
@@ -233,8 +234,10 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<Sea
             seenPageLinks.add(item.link);
             return count + 1;
           }, 0);
-          if (rawPageResults.length === 0) break;
-          if (query.fetchAllPages && newLinks === 0) break;
+          if (rawPageResults.length === 0 || newLinks === 0) {
+            stoppedForNoProgress = true;
+            break;
+          }
         }
         if (query.newsOnly && pageResults.length === 0) break;
       }
@@ -247,7 +250,7 @@ export function createSerpApiProvider(options: SerpApiProviderOptions): Omit<Sea
         requestParameters,
         pagesFetched,
         pagesRequested: Number.isFinite(maxPages) ? maxPages : null,
-        pageLimitReached: !query.newsOnly && Number.isFinite(maxPages) && pagesFetched === maxPages && lastPageResultCount > 0,
+        pageLimitReached: !query.newsOnly && !stoppedForNoProgress && Number.isFinite(maxPages) && pagesFetched === maxPages && lastPageResultCount > 0,
         paginationError,
       };
     },

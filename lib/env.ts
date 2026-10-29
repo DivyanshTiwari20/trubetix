@@ -2,6 +2,7 @@ import "server-only";
 import { z } from "zod";
 import { RESEARCH_DEFAULTS } from "@/lib/config";
 import { integrationStatusSchema } from "@/lib/validation/research";
+import type { ApifyInstagramConfig } from "@/lib/providers/apify-instagram";
 
 export type IntegrationStatus = z.infer<typeof integrationStatusSchema>;
 
@@ -129,6 +130,18 @@ export function getNewsApiKey(): string | null {
   return readString("NEWSAPI_API_KEY") ?? null;
 }
 
+export function getApifyInstagramConfig(): ApifyInstagramConfig | null {
+  const apiToken = readString("APIFY_API_TOKEN");
+  const actorId = readString("APIFY_INSTAGRAM_ACTOR_ID");
+  if (!apiToken || !actorId) return null;
+  return {
+    apiToken,
+    actorId,
+    maxResults: readInt("TUBITEX_APIFY_MAX_RESULTS", 50, 1, 100),
+    timeoutMs: readInt("TUBITEX_APIFY_TIMEOUT_MS", 45_000, 5_000, 120_000),
+  };
+}
+
 export function getIntegrationStatus(): IntegrationStatus {
   const gemini = getGeminiConfig();
   return {
@@ -141,5 +154,6 @@ export function getIntegrationStatus(): IntegrationStatus {
     },
     serpapi: { configured: getSerpApiKey() !== null },
     newsapi: { configured: getNewsApiKey() !== null },
+    apify: { configured: getApifyInstagramConfig() !== null },
   };
 }

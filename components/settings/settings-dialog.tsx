@@ -16,6 +16,7 @@ interface HealthIntegration {
   gemini: { configured: boolean; model: string };
   serpapi: { configured: boolean };
   newsapi: { configured: boolean };
+  apify?: { configured: boolean };
 }
 
 interface HealthResponse {
@@ -108,6 +109,13 @@ export function SettingsDialog({
               label="NewsAPI"
               detail={health.integrations.newsapi.configured ? "News search enabled" : "Optional — NEWSAPI_API_KEY missing"}
               configured={health.integrations.newsapi.configured}
+            />
+            <StatusRow
+              label="Apify"
+              detail={health.integrations.apify?.configured
+                ? "Deep thinking Instagram search enabled"
+                : "Set APIFY_API_TOKEN and APIFY_INSTAGRAM_ACTOR_ID"}
+              configured={health.integrations.apify?.configured ?? false}
             />
             <Separator className="my-3" />
             <div className="flex items-start gap-2 text-xs text-muted-foreground">

@@ -6,8 +6,9 @@ import { createSerpApiProvider, type SerpApiSearchResult } from "@/lib/providers
 import type { SerpApiOrganicResult } from "@/lib/providers/types";
 import { getSerpApiKey, getResearchConfig } from "@/lib/env";
 import { APP_TZ } from "@/lib/config";
+import { fetchJson } from "@/lib/http";
 import { logger } from "@/lib/logger";
-import type { ResearchMeta } from "@/types";
+import type { HistoryTurn, ResearchMeta } from "@/types";
 import { shortcodeFromUrl, dateFromShortcode } from "@/lib/research/igDate";
 import { resolveDateRangeApp, toSerpApiTbsApp } from "@/lib/research/dateRange";
 import type { ResolvedDateRangeApp } from "@/lib/research/dateRange";
@@ -16,7 +17,7 @@ export interface SimpleInstagramPost {
   url: string;
   title: string;
   account: string;
-  accountSource: "provider" | "search-result text" | null;
+  accountSource: "provider" | "search-result text" | "oembed" | null;
   dateISO: string | null;
   dateText: string | null;
   googleRelativeTime: string | null;
@@ -42,11 +43,11 @@ export type EntityExtractionResult = z.infer<typeof entityExtractionSchema>;
 
 const EXTRACTION_SYSTEM_INSTRUCTION = `You are an entity extraction assistant for an Instagram research tool.
 
-Extract the primary entity and intent for the CURRENT Instagram request. The current user message is authoritative; use prior user messages only to resolve a clear follow-up that has no entity of its own. Never let an older entity override a name or brand explicitly present in the current message.
+Extract the primary entity and intent for the CURRENT Instagram request. The current user message is authoritative; use the prior conversation (including assistant replies) only to resolve a clear follow-up that has no entity of its own. Never let an older entity override a name or brand explicitly present in the current message.
 
 IGNORE these filler words - they are NEVER entities: tell, tll, me, about, give, show, what, how, many, posts, number, reaction, people, saying, on, insta, instagram, in, last, days, good, bad, business, bussiness, image, fit, suitable, right, wrong, should, would, could, the, a, an, and, or, but, if, then, than, that, this, these, those, there, their, them, they, it, its, of, to, for, with, from, by, into, over, under, again, further, once, here, all, any, some, no, not, only, own, same, so, too, very, just, please, find, analyze, analyse, identify, summarize, summarise, explain, describe, report, around, regarding, concerning, our, my, we, i, us, you, your, client, clients, latest, recent, new, major, most, past, next, week, weeks, month, months, day, year, years, today, yesterday, media, conversation, narratives, narrative, risks, risk, changes, change, developments, happening, buzzing, buzz, happened, cover, coverage, story, stories, outlet, outlets, press, publication, publications, competitor, competitors, reputational, reputation, potential, team, investigate, recommend, actions, action, things, thing, much, more, less, anyone, someone, anything, everything, something, ig, tiktok, twitter, facebook, youtube, linkedin, reddit, threads, social, reel, reels, viral, trending, trend, sentiment, reactions, reacting, respond, responding, response, comments, comment, engagement, followers, follower, following, profile, profiles, account, accounts, bio, opinions, opinion, numbers, metric, metrics, statistics, statistic, stats, stat, figures, figure, count, counts, data, insights, insight, performance, reach, impressions, views, likes, shares, growth, overall, film, movie, series, show, person
 
-A pronoun (him/her/them/his) means the entity from the previous USER message.
+A pronoun (him/her/them/his) means the entity from the previous USER message or the entity discussed in the prior assistant reply.
 
 Return the REAL person/brand/hashtag name, properly capitalised. Correct common misspellings of famous people (e.g., "samain raina" → "Samay Raina", "srk" → "Shah Rukh Khan", "virat" → "Virat Kohli", "salman" → "Salman Khan"). If the name is not a known figure, keep the text as the user wrote it but capitalize properly.
 
@@ -56,10 +57,10 @@ Return null for entity ONLY if there is genuinely no name-like word in the messa
 
 Also identify the intent:
 - "count" = user wants a post count/number (how many posts, total posts, count)
-- "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz, image, reputation
+- "narrative" = user wants what people are saying, sentiment, reactions, narratives, buzz, image, reputation, OR asks about likes, comments, engagement, dates, accounts, or specific posts
 - "business_fit" = user asks if person is good/suitable/fit for their business, brand fit, image for business
 - "show_more" = user explicitly wants more posts/results
-- "chat" = greeting, hi, thanks, bye, how are you, what can you do, small talk
+- "chat" = greeting, hi, thanks, bye, how are you, what can you do, small talk with no request for post data
 - "unclear" = genuinely no entity-like word at all (e.g., "hello", "what can you do")
 
 Default to "narrative" if an entity is found but intent is ambiguous.
@@ -88,14 +89,22 @@ function sameEntityText(left: string, right: string): boolean {
   return normalize(left) === normalize(right);
 }
 
+function formatHistory(history: HistoryTurn[], limit = 6): string {
+  return history
+    .filter((turn) => turn.content.trim())
+    .slice(-limit)
+    .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content.trim()}`)
+    .join("\n");
+}
+
 async function extractEntityWithGemini(
   question: string,
-  userHistory: string[],
+  history: HistoryTurn[],
   gemini: GeminiClient,
   signal?: AbortSignal
 ): Promise<EntityExtractionResult> {
-  const priorMessages = userHistory.filter((message) => message.trim() !== question.trim()).slice(-6);
-  const prompt = `Current user message (use this first):\n${question}\n\nPrior user messages for follow-up context only:\n${priorMessages.map((m, i) => `${i + 1}. ${m}`).join("\n") || "(none)"}`;
+  const priorTurns = history.filter((turn) => turn.content.trim() !== question.trim());
+  const prompt = `Current user message (use this first):\n${question}\n\nPrior conversation for follow-up context only:\n${formatHistory(priorTurns) || "(none)"}`;
 
   const response = await gemini.generateStructured({
     systemInstruction: EXTRACTION_SYSTEM_INSTRUCTION,
@@ -290,27 +299,80 @@ function uniqueMetricFromValues(
   return distinct.size === 1 ? [...distinct.values()][0] : null;
 }
 
-function extractOwner(raw: SerpApiOrganicResult): string | null {
-  const owner = raw.owner;
-  if (typeof owner === "string" && owner.trim()) return owner.trim().replace(/^@/, "");
-  if (owner && typeof owner === "object") {
-    const username = "username" in owner ? owner.username : null;
-    if (typeof username === "string" && username.trim()) return username.trim().replace(/^@/, "");
+function accountValue(value: unknown): string | null {
+  const candidates = typeof value === "string"
+    ? [value]
+    : value && typeof value === "object"
+      ? ["username", "handle", "user_name"].map((key) => (value as Record<string, unknown>)[key])
+      : [];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    const text = candidate.trim();
+    const explicitHandle = text.match(/@([A-Za-z0-9._]{1,30})/);
+    if (explicitHandle) return explicitHandle[1].toLowerCase();
+    const normalized = text.replace(/^@/, "");
+    if (normalized.toLowerCase() === "instagram") continue;
+    if (/^[A-Za-z0-9._]{1,30}$/.test(normalized)) return normalized.toLowerCase();
+    return normalized;
   }
-  if (typeof raw.username === "string" && raw.username.trim()) return raw.username.trim().replace(/^@/, "");
   return null;
 }
 
-function extractHashtags(caption: string | null, supplied: unknown): string[] {
-  const values = Array.isArray(supplied)
-    ? supplied.filter((value): value is string => typeof value === "string")
-    : [];
-  const fromCaption = caption?.match(/#[\p{L}\p{N}_]+/gu) ?? [];
-  return [...new Set([...values, ...fromCaption])];
+function extractOwner(raw: SerpApiOrganicResult): string | null {
+  for (const value of [
+    raw.owner,
+    raw.username,
+    raw.author_username,
+    raw.owner_username,
+    raw.account_username,
+    raw.profile_username,
+    raw.author,
+    raw.user,
+  ]) {
+    const account = accountValue(value);
+    if (account) return account;
+  }
+  return null;
 }
 
-function extractSnippetHashtags(snippet: string | null): string[] {
-  return [...new Set(snippet?.match(/#[\p{L}\p{N}_]+/gu) ?? [])];
+function uniqueHashtags(values: string[]): string[] {
+  const tags = new Map<string, string>();
+  for (const value of values) {
+    const tag = value.startsWith("#") ? value : `#${value}`;
+    const key = tag.toLowerCase();
+    if (!tags.has(key)) tags.set(key, tag);
+  }
+  return [...tags.values()];
+}
+
+function extractTextHashtags(...texts: Array<string | null | undefined>): string[] {
+  return uniqueHashtags(texts.flatMap((text) => text?.match(/#[\p{L}\p{N}_]+/gu) ?? []));
+}
+
+function extractHashtags(
+  caption: string | null,
+  supplied: unknown,
+  title: string,
+  snippet: string | null,
+): string[] {
+  const suppliedTags = Array.isArray(supplied)
+    ? supplied.flatMap((value): string[] => {
+        if (typeof value !== "string" || !value.trim()) return [];
+        const text = value.trim();
+        const marked = text.match(/#[\p{L}\p{N}_]+/gu);
+        if (marked?.length) return marked;
+        return /^[\p{L}\p{N}_]+$/u.test(text) ? [`#${text}`] : [];
+      })
+    : [];
+  return uniqueHashtags([
+    ...suppliedTags,
+    ...extractTextHashtags(caption, title, snippet),
+  ]);
+}
+
+function extractSnippetHashtags(snippet: string | null, title: string): string[] {
+  return extractTextHashtags(title, snippet);
 }
 
 function extractAccountFromText(title: string, snippet: string | null, displayedLink: string | null): string {
@@ -319,7 +381,13 @@ function extractAccountFromText(title: string, snippet: string | null, displayed
   const parenMatch = combined.match(/\(@([A-Za-z0-9._]{1,30})\)/);
   if (parenMatch) return parenMatch[1].toLowerCase();
 
-  const onMatch = (snippet ?? "").match(/^([A-Za-z0-9._]{1,30})\s+on\s+\d/);
+  const titleHandleMatch = title.match(/(?:^|\s)@([A-Za-z0-9._]{1,30})(?=\s|$|[|•·,:])/);
+  if (titleHandleMatch) return titleHandleMatch[1].toLowerCase();
+
+  const byHandleMatch = title.match(/\b(?:post|photo|reel)\s+by\s+@([A-Za-z0-9._]{1,30})\b/i);
+  if (byHandleMatch) return byHandleMatch[1].toLowerCase();
+
+  const onMatch = (snippet ?? "").match(/^\s*@?([A-Za-z0-9._]{1,30})\s+on\s+(?:Instagram\b|\d|[A-Z][a-z]{2,}\b)/i);
   if (onMatch) return onMatch[1].toLowerCase();
 
   if (displayedLink) {
@@ -372,8 +440,8 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
   const googleRelativeTime = extractGoogleRelativeTime(snippet);
   const captionValue = typeof raw.caption === "string" ? raw.caption : raw.caption_text;
   const caption = typeof captionValue === "string" && captionValue.trim() ? captionValue.trim() : null;
-  const hashtags = extractHashtags(caption, raw.hashtags);
-  const snippetHashtags = extractSnippetHashtags(snippet);
+  const hashtags = extractHashtags(caption, raw.hashtags, title, snippet);
+  const snippetHashtags = extractSnippetHashtags(snippet, title);
 
   const detected = raw.rich_snippet?.top?.detected_extensions ?? {};
   const detectedLikes = Object.entries(detected)
@@ -446,6 +514,74 @@ function normalizePost(raw: SerpApiOrganicResult): SimpleInstagramPost | null {
     dateSource,
     providerMetadata: { ...raw },
   };
+}
+
+interface InstagramOEmbed {
+  author_name?: string;
+  author_url?: string;
+}
+
+const OEMBED_TIMEOUT_MS = 2_000;
+const OEMBED_CONCURRENCY = 8;
+
+async function fetchOEmbedAccount(url: string, signal?: AbortSignal): Promise<string | null> {
+  try {
+    const endpoint = `https://www.instagram.com/api/v1/oembed/?url=${encodeURIComponent(url)}`;
+    const data = await fetchJson<InstagramOEmbed>(
+      endpoint,
+      {
+        headers: {
+          accept: "application/json",
+          "user-agent": "Mozilla/5.0",
+        },
+      },
+      { timeoutMs: OEMBED_TIMEOUT_MS, retries: 0, signal },
+    );
+    if (typeof data.author_url === "string") {
+      const match = data.author_url.match(
+        /instagram\.com\/(?!p(?:\/|$)|reel(?:\/|$)|reels(?:\/|$)|tv(?:\/|$)|stories(?:\/|$)|explore(?:\/|$))([A-Za-z0-9._]+)/i,
+      );
+      if (match) return match[1].toLowerCase();
+    }
+    if (typeof data.author_name === "string") {
+      const name = data.author_name.trim().replace(/^@/, "");
+      if (name) return /^[A-Za-z0-9._]+$/.test(name) ? name.toLowerCase() : name;
+    }
+    return null;
+  } catch (error) {
+    logger.warn("Instagram oEmbed lookup failed", {
+      url,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+async function enrichMissingAccounts(
+  posts: SimpleInstagramPost[],
+  signal?: AbortSignal,
+): Promise<SimpleInstagramPost[]> {
+  const targets = posts.filter((post) => post.account === "unknown");
+  if (targets.length === 0) return posts;
+
+  const accounts = new Map<string, string>();
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(OEMBED_CONCURRENCY, targets.length) }, async () => {
+    while (nextIndex < targets.length) {
+      if (signal?.aborted) break;
+      const post = targets[nextIndex];
+      nextIndex += 1;
+      if (!post) break;
+      const account = await fetchOEmbedAccount(post.url, signal);
+      if (account) accounts.set(post.url, account);
+    }
+  });
+  await Promise.all(workers);
+
+  return posts.map((post) => {
+    const account = accounts.get(post.url);
+    return account ? { ...post, account, accountSource: "oembed" as const } : post;
+  });
 }
 
 function dateAtUtcNoonForLocalDay(iso: string, timezone: string): string {
@@ -606,16 +742,18 @@ async function searchInstagramPosts(
       }
     }
   }
-  const discoveryQueries = paths.flatMap((path) =>
-    [...discoveryTerms.entries()].flatMap(([term, entity]) => {
-      const safeTerm = term.replace(/[\"\r\n]/g, " ").replace(/\s+/g, " ").trim();
+  // Interleave post types for each entity/keyword so a bounded request budget
+  // does not spend all its coverage on the first URL family (usually /p/).
+  const discoveryQueries = [...discoveryTerms.entries()].flatMap(([term, entity]) => {
+    const safeTerm = term.replace(/[\"\r\n]/g, " ").replace(/\s+/g, " ").trim();
+    return paths.flatMap((path) => {
       const queries = [`site:instagram.com inurl:${path} \"${safeTerm}\" after:${afterText} before:${beforeText}`];
       if (safeTerm.includes(" ")) {
         queries.push(`site:instagram.com inurl:${path} ${safeTerm} after:${afterText} before:${beforeText}`);
       }
       return queries.map((query) => ({ entity, query }));
-    }),
-  );
+    });
+  });
   const seenQueries = new Set<string>();
   const queryVariations = discoveryQueries.filter(({ query }) => {
     if (seenQueries.has(query)) return false;
@@ -632,13 +770,23 @@ async function searchInstagramPosts(
   let pagesFetched = 0;
   let lastError: string | null = null;
 
-  const maxSearches = Math.max(1, config.maxSerpApiSearches);
-  let searchesRemaining = maxSearches;
+  const maxPageRequests = Math.max(1, config.maxSerpApiSearches);
+  let pageRequestsRemaining = maxPageRequests;
   const maxPagesPerQuery = Math.max(1, config.maxGooglePages);
 
-  for (const { entity, query } of queryVariations) {
-    if (searchesRemaining <= 0) break;
-    const pages = Math.min(maxPagesPerQuery, searchesRemaining);
+  for (let queryIndex = 0; queryIndex < queryVariations.length; queryIndex += 1) {
+    if (pageRequestsRemaining <= 0) break;
+    const variation = queryVariations[queryIndex];
+    if (!variation) continue;
+    const { entity, query } = variation;
+    const remainingQueries = queryVariations.length - queryIndex;
+    // Spread page calls across remaining dorks instead of letting the first
+    // query consume the whole budget. If a dork ends early, its unused budget
+    // naturally remains available to later queries.
+    const pages = Math.min(
+      maxPagesPerQuery,
+      Math.max(1, Math.ceil(pageRequestsRemaining / remainingQueries)),
+    );
     queriesTried.push(query);
     logger.info("Instagram simple query", { query, entity, rangeLabel, pages });
 
@@ -655,6 +803,7 @@ async function searchInstagramPosts(
         { signal },
       );
     } catch (error) {
+      pageRequestsRemaining -= 1;
       lastError = error instanceof Error ? error.message : String(error);
       paginationErrors.push(`${query}: ${lastError}`);
       logger.error("Instagram SerpAPI query failed", { error: lastError, entity, query });
@@ -662,11 +811,12 @@ async function searchInstagramPosts(
     }
 
     if (!result) {
+      pageRequestsRemaining -= 1;
       lastError = "Provider does not support searchWithInfo";
       paginationErrors.push(`${query}: ${lastError}`);
       continue;
     }
-    searchesRemaining -= Math.max(1, result.pagesFetched);
+    pageRequestsRemaining -= Math.max(1, result.pagesFetched);
     rawOrganicResultsFetched += result.rawOrganicResults.length;
     pagesFetched += result.pagesFetched;
     if (result.pageLimitReached) queriesAtPageLimit.push(query);
@@ -684,7 +834,7 @@ async function searchInstagramPosts(
   }
 
   return {
-    posts: allPosts,
+    posts: await enrichMissingAccounts(allPosts, signal),
     googleEstimate,
     estimateQuery,
     estimateDateRange: estimateQuery ? estimateDateRange : null,
@@ -750,17 +900,20 @@ async function fetchMorePosts(
     seenPostShortcodes.add(postShortcode);
     allPosts.push({ ...normalized, url: canonicalUrl });
   }
-  return allPosts;
+  return enrichMissingAccounts(allPosts, signal);
 }
 
 interface GeminiAnalysisInput {
+  question: string;
   posts: Array<{
     title: string;
     account: string;
     date: string | null;
     likes: string | null;
+    comments: string | null;
     snippet: string;
   }>;
+  postCount: number;
   intent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` | "other";
   entity: string;
 }
@@ -775,13 +928,13 @@ async function analyzeWithGemini(
   signal?: AbortSignal
 ): Promise<string> {
   const postsText = input.posts.map((p, i) =>
-    `${i + 1}. ${p.title} | @${p.account} | ${p.date ?? "no date"} | ${p.likes ?? "no likes"} | ${p.snippet}`
+    `${i + 1}. ${p.title} | @${p.account} | ${p.date ?? "no date"} | ${p.likes ?? "no likes"} | ${p.comments ?? "no comments"} | ${p.snippet}`
   ).join("\n");
 
-  let systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian English, short sentences, warm but direct, no corporate words, no emoji in results (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Use only the posts you are given; attribute claims ('according to posts by ...') and say 'reported' for allegations. Never write post counts, likes totals or estimate numbers yourself; the app shows those. If you do not understand, ask one short question. If the posts do not cover the question, say so in one line.`;
+  let systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian English, short sentences, warm but direct, no corporate words, no emoji in results (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Use only the posts you are given; attribute claims ('according to posts by ...') and say 'reported' for allegations. The app shows post counts, the Google estimate, and engagement in the results card. Don't repeat the post count or estimate unless it directly answers the user's question; you may mention engagement or dates when they directly answer the question, using only values present in the posts. Answer the user's actual question, not a generic summary. If you do not understand, ask one short question. If the posts do not cover the question, say so in one line. End with one short, relevant follow-up question on a new line.`;
 
   if (input.intent === "count") {
-    systemInstruction += `\n\nWrite EXACTLY ONE sentence summarizing the key themes or activity. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+    systemInstruction += `\n\nAnswer the user's count question directly in one short sentence using the supplied retrieved-post count. Describe it as unique posts found by this Google search, not the total number of Instagram posts. Do not infer counts beyond the supplied value.`;
   } else if (input.intent.startsWith("business_fit")) {
     const businessType = input.intent.split(":")[1] || "business";
     systemInstruction += `\n\nThe user asks if "${input.entity}" is a good fit for their ${businessType} business. Write 5 to 7 short sentences using ONLY the supplied posts:
@@ -793,12 +946,12 @@ State in one line: "This assessment is based on Instagram posts only."
 End with ONE short follow-up question (e.g., about their target audience).
 Never state allegations as facts. Never invent facts not in the posts.`;
   } else if (input.intent === "narrative") {
-    systemInstruction += `\n\nWrite a short answer (max 8 sentences). Themes as short bullets. Attribute claims. Use "reported" for allegations. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+    systemInstruction += `\n\nWrite a short, natural answer (3 to 6 sentences) that directly answers the user's question. Use short bullets only if they genuinely help. Attribute claims. Use "reported" for allegations. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
   } else {
-    systemInstruction += `\n\nProvide a brief answer about Instagram posts for "${input.entity}". Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+    systemInstruction += `\n\nProvide a brief, conversational answer about the Instagram posts for "${input.entity}" that directly answers the user's question. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
   }
 
-  const prompt = `Instagram posts for "${input.entity}" (up to 30 posts):\n${postsText}`;
+  const prompt = `The user asked: "${input.question}"\nUnique Instagram posts retrieved for this search window: ${input.postCount}\n\nInstagram posts for "${input.entity}" (up to 30 posts):\n${postsText}`;
 
   const response = await gemini.generateStructured({
     systemInstruction,
@@ -818,16 +971,19 @@ Never state allegations as facts. Never invent facts not in the posts.`;
 
 async function chatWithGemini(
   message: string,
+  history: HistoryTurn[],
   gemini: GeminiClient,
   signal?: AbortSignal
 ): Promise<string> {
-  const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian short sentences, warm but direct, no corporate words, no emoji (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Keep it to 1-3 lines.`;
-  
+  const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian short sentences, warm but direct, no corporate words, no emoji (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Keep it to 1-3 lines. Use the prior conversation when the user is following up. End with a short, natural follow-up question when it fits.`;
+
   const schema = z.object({ answer: z.string() });
-  
+  const prior = formatHistory(history.filter((turn) => turn.content.trim() !== message.trim()));
+  const userContent = prior ? `Prior conversation:\n${prior}\n\nUser: ${message}` : message;
+
   const response = await gemini.generateStructured({
     systemInstruction,
-    userContent: message,
+    userContent,
     responseSchema: toGeminiSchema(schema),
     temperature: 0.7,
     signal,
@@ -848,9 +1004,22 @@ function sortPostsByLikes(posts: SimpleInstagramPost[]): SimpleInstagramPost[] {
   return posts;
 }
 
+function ensureFollowUp(message: string, intent: string, entity: string): string {
+  const trimmed = message.trim();
+  if (!trimmed || /\?["')\]]*\s*$/.test(trimmed)) return trimmed;
+  const followUp = intent === "chat"
+    ? "Want me to check another person or brand?"
+    : intent === "count"
+      ? "Want me to break this down by account or date range?"
+      : intent.startsWith("business_fit")
+        ? `Want me to compare ${entity} with a competitor?`
+        : "Want me to focus on a specific account, theme, or the most-liked post?";
+  return `${trimmed}\n\n${followUp}`;
+}
+
 export async function runSimpleInstagramResearch(
   question: string,
-  history: string[],
+  history: HistoryTurn[],
   dateFrom: string | null,
   dateTo: string | null,
   datePreset: string | null,
@@ -917,9 +1086,9 @@ export async function runSimpleInstagramResearch(
 
   if (intent === "chat") {
     try {
-      const reply = await chatWithGemini(question, gemini, signal);
+      const reply = await chatWithGemini(question, history, gemini, signal);
       return {
-        message: reply,
+        message: ensureFollowUp(reply, intent, ""),
         meta: { ...emptyMeta, status: "ok", intent: "overview", integrations: { gemini: { configured: true, model: "gemini-1.5-flash" }, serpapi: { configured: true }, newsapi: { configured: false } } }
       };
     } catch (error) {
@@ -971,7 +1140,7 @@ export async function runSimpleInstagramResearch(
   if (error && googleEstimate === null) {
     logger.error("Instagram search failed", { error, entity, queries: queriesTried });
     return {
-      message: "I couldn't reach Google search just now. Please try again in a minute.",
+      message: "I couldn't reach Google search just now. Want to try again in a minute?",
       meta: { ...emptyMeta, limitations: [error] },
     };
   }
@@ -986,6 +1155,7 @@ export async function runSimpleInstagramResearch(
         account: post.account,
         date: post.dateText ?? post.googleRelativeTime ?? post.dateISO,
         likes: post.likesText,
+        comments: post.commentsText,
         snippet: post.snippet,
       }));
       let analysisIntent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` = intent;
@@ -994,11 +1164,24 @@ export async function runSimpleInstagramResearch(
         const businessType = businessMatch ? businessMatch[1].trim() : "business";
         analysisIntent = `business_fit:${businessType}`;
       }
-      message = await analyzeWithGemini({ posts: postsForGemini, intent: analysisIntent, entity }, gemini, signal);
+      message = await analyzeWithGemini(
+        { question, posts: postsForGemini, postCount: allPosts.length, intent: analysisIntent, entity },
+        gemini,
+        signal,
+      );
     } catch (error) {
       logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
     }
   }
+
+  if (!message.trim()) {
+    message = allPosts.length > 0
+      ? intent === "count"
+        ? `I found ${allPosts.length} unique Instagram posts for "${entity}" in this search window. This is the number retrieved by this search, not an Instagram-wide total.`
+        : `I found some Instagram posts for "${entity}" in this window, but I couldn't turn them into a full summary just now. The posts are below — want me to focus on a specific account, theme, or the most-liked post?`
+      : `I couldn't find any Instagram posts for "${entity}" in this date window. Want me to widen the range or try a different spelling?`;
+  }
+  message = ensureFollowUp(message, intent, entity);
 
   const instagramResults = {
     entity,
@@ -1072,5 +1255,8 @@ export async function runShowMorePosts(
   
   const allPosts = await fetchMorePosts(entity, rangeFrom, rangeTo, config, existingPosts, signal);
   const sortedPosts = sortPostsByLikes(allPosts);
-  return { message: "Additional Instagram posts are ready to display.", allPosts: sortedPosts };
+  return {
+    message: "Additional Instagram posts are ready to display. Want me to focus on a specific account or theme?",
+    allPosts: sortedPosts,
+  };
 }

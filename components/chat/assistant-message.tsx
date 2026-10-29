@@ -138,7 +138,10 @@ export function AssistantMessage({
         ) : analysis ? (
           <p className="text-sm leading-relaxed">{analysis.executiveSummary}</p>
         ) : null}
-        <InstagramResults data={instagramResults} />
+        <InstagramResults
+          key={`${message.id}-${message.meta?.generatedAt ?? ""}`}
+          data={instagramResults}
+        />
         {actions}
       </div>
     );

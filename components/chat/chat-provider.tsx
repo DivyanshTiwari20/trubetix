@@ -27,12 +27,17 @@ import { STORAGE_KEYS } from "@/lib/config";
 import { useStoredString } from "@/lib/hooks/use-stored-state";
 import { conversationStore } from "@/lib/storage/conversation-store";
 import { readString, removeKey, writeString } from "@/lib/storage/preferences";
-import type { Conversation, DatePreset, Feedback, HistoryTurn } from "@/types";
+import type { Conversation, DatePreset, Feedback, HistoryTurn, SearchMode } from "@/types";
 
 const VALID_PRESETS: DatePreset[] = ["24h", "7d", "30d", "90d", "custom"];
+const VALID_SEARCH_MODES: SearchMode[] = ["google", "deep"];
 
 function isDatePreset(value: string | null): value is DatePreset {
   return value !== null && (VALID_PRESETS as string[]).includes(value);
+}
+
+function isSearchMode(value: string | null): value is SearchMode {
+  return value !== null && (VALID_SEARCH_MODES as string[]).includes(value);
 }
 
 interface ChatContextValue {
@@ -42,6 +47,8 @@ interface ChatContextValue {
   isGenerating: boolean;
   datePreset: DatePreset;
   setDatePreset: (preset: DatePreset) => void;
+  searchMode: SearchMode;
+  setSearchMode: (mode: SearchMode) => void;
   newConversation: () => void;
   selectConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
@@ -66,9 +73,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
   const [storedPreset, setStoredPreset] = useStoredString(STORAGE_KEYS.datePreset, "7d");
   const datePreset: DatePreset = isDatePreset(storedPreset) ? storedPreset : "7d";
+  const [storedSearchMode, setStoredSearchMode] = useStoredString(STORAGE_KEYS.searchMode, "google");
+  const searchMode: SearchMode = isSearchMode(storedSearchMode) ? storedSearchMode : "google";
 
   const stateRef = useRef(state);
   const datePresetRef = useRef(datePreset);
+  const searchModeRef = useRef(searchMode);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -78,6 +88,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     datePresetRef.current = datePreset;
   }, [datePreset]);
+
+  useEffect(() => {
+    searchModeRef.current = searchMode;
+  }, [searchMode]);
 
   useEffect(() => {
     const conversations = conversationStore.load();
@@ -107,6 +121,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setStoredPreset(preset);
     },
     [setStoredPreset],
+  );
+
+  const setSearchMode = useCallback(
+    (mode: SearchMode) => {
+      searchModeRef.current = mode;
+      setStoredSearchMode(mode);
+    },
+    [setStoredSearchMode],
   );
 
   const newConversation = useCallback(() => {
@@ -173,6 +195,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             conversationId,
             history: options.history,
             dateRange: { preset: datePresetRef.current },
+            searchMode: searchModeRef.current,
           },
           { signal: controller.signal },
         );
@@ -286,6 +309,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       isGenerating: state.status === "submitting",
       datePreset,
       setDatePreset,
+      searchMode,
+      setSearchMode,
       newConversation,
       selectConversation,
       renameConversation,
@@ -304,6 +329,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       activeConversation,
       datePreset,
       setDatePreset,
+      searchMode,
+      setSearchMode,
       newConversation,
       selectConversation,
       renameConversation,

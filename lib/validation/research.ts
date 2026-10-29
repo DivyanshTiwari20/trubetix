@@ -70,6 +70,7 @@ export const integrationStatusSchema = z.object({
   }),
   serpapi: z.object({ configured: z.boolean() }),
   newsapi: z.object({ configured: z.boolean() }),
+  apify: z.object({ configured: z.boolean() }).optional(),
 });
 
 export const researchIntentKindSchema = z.enum([
@@ -98,6 +99,7 @@ export const instagramPostViewSchema = z.object({
 export const instagramResultsViewSchema = z.object({
   entity: z.string(),
   dateRangeLabel: z.string(),
+  retrievalSource: z.enum(["google", "apify"]).optional(),
   googleEstimatedResults: z.string().nullable(),
   estimateQuery: z.string().nullable(),
   estimateDateRange: dateRangeSchema.nullable().optional(),

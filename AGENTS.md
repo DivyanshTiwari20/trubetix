@@ -17,14 +17,14 @@ synthesising an evidence-backed briefing with Google Gemini.
 ## Commands
 
 - `npm run dev` — start the dev server (Turbopack).
-- `npm run build` — production build. Run this before finishing work: it also
-  type-checks and enforces the Cache Components constraints below.
+- `npm run build` — production build; also type-checks and enforces the Cache Components constraints below.
 - `npm run lint` — ESLint (flat config, `eslint.config.mjs`).
 - `npm run typecheck` — `tsc --noEmit`.
 - `npm test` — Vitest (single run). `npm run test:watch` for watch mode.
 
-Always run `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build`
-before considering a change complete.
+Do not run tests, builds, lint, type-checks, or similar validation commands unless
+the user explicitly authorizes them. Preserve any already-running development
+server; inspect source changes manually when permission to validate is absent.
 
 ## Architecture
 
@@ -57,6 +57,31 @@ before considering a change complete.
 - `lib/storage/` — per-browser `localStorage` persistence (no database).
 - `lib/hooks/use-stored-state.ts` — `useSyncExternalStore`-based persistence hook
   for UI preferences.
+- `lib/instagram-simple.ts` handles the direct Instagram-chat path: it searches
+  Google dorks through SerpAPI pagination and deduplicates post shortcodes.
+  Account attribution uses returned metadata/text and an Instagram oEmbed
+  fallback; hashtags come from returned metadata, titles, captions, and snippets.
+  Gemini answers the current question using conversation history. Dork queries
+  interleave Instagram post types and distribute the per-search page-request
+  budget across query variations; empty or duplicate-only result pages stop
+  pagination. Bounds are `TUBITEX_MAX_GOOGLE_PAGES` (default 10 pages per dork)
+  and `TUBITEX_MAX_SERPAPI_SEARCHES` (default 15 discovery page requests).
+  Google/SerpAPI results are not an Instagram-wide count. The results UI initially
+  renders 10 retrieved rows and reveals more with Show more; the Likes column
+  displays only the like count, with no comments metric. The Account column is
+  last in the results table.
+- `lib/instagram-apify.ts` is the explicit Deep thinking retrieval path, separate
+  from the Google path and selected in the chat composer. It uses the documented
+  keyword/hashtag inputs of `apify/instagram-hashtag-scraper`; no profile-timeline
+  or exhaustive-search capability is implied. Keep the configured actor ID
+  validated against the request schema this integration sends. It makes one
+  bounded Actor run per submitted query: `resultsLimit` is a result cap, not
+  pagination; do not present an unused page-count setting as working pagination
+  or silently add extra paid runs. Filter returned timestamps locally to the
+  selected window because this Actor does not document exact from/to inputs.
+  Apify credentials must remain server-only and Deep thinking failures must never
+  fall through to Google/SerpAPI. Deep thinking initially displays 10 existing
+  rows; Show more reveals already-fetched rows without another Actor run.
 
 ## Conventions and gotchas
 
@@ -80,15 +105,22 @@ before considering a change complete.
   excluded from the window and reported.
 - Keep Zod schemas as the source of truth; derive types with `z.infer` rather than
   hand-writing interfaces.
+- Instagram result answers should stay grounded in fetched posts, respond to the
+  user's actual question, and offer a relevant conversational follow-up. Never
+  guess an account or hashtag when search metadata does not provide one.
 
 ## Environment
 
 Copy `.env.example` to `.env.local`. `GEMINI_API_KEY` (AI analysis) and
-`SERPAPI_API_KEY` (retrieval, also Instagram profiles) enable live mode; without
-them the app runs in a clearly-labelled degraded mode. `NEWSAPI_API_KEY` is
-optional. Tuning variables (`TUBITEX_*`, including
-`TUBITEX_MAX_INSTAGRAM_QUERIES` and `TUBITEX_MAX_INSTAGRAM_PROFILES`) are
-documented in `.env.example`.
+`SERPAPI_API_KEY` (retrieval, also Instagram profiles) enable Google mode;
+without them the app runs in a clearly-labelled degraded mode. `NEWSAPI_API_KEY`
+is optional. Deep thinking additionally requires server-side `APIFY_API_TOKEN`
+and `APIFY_INSTAGRAM_ACTOR_ID=apify/instagram-hashtag-scraper`; the optional
+`TUBITEX_APIFY_MAX_RESULTS` and `TUBITEX_APIFY_TIMEOUT_MS` bound its single
+Actor run. The Apify token must never enter client code or logs. Missing Deep
+thinking setup or retrieval errors must be explicit, with no Google fallback.
+Tuning variables (`TUBITEX_*`, including `TUBITEX_MAX_INSTAGRAM_QUERIES` and
+`TUBITEX_MAX_INSTAGRAM_PROFILES`) are documented in `.env.example`.
 
 ## Testing
 

@@ -33,7 +33,7 @@ describe("Instagram estimate card", () => {
 
     expect(screen.getByText("Google estimated search results")).toBeInTheDocument();
     expect(screen.getByText("34", { exact: true })).toBeInTheDocument();
-    expect(screen.getByText("Posts shown")).toBeInTheDocument();
+    expect(screen.getByText("Posts found")).toBeInTheDocument();
     expect(screen.getByText("0", { exact: true })).toBeInTheDocument();
     expect(screen.getByText("Oct 20, 2026 – Oct 27, 2026")).toBeInTheDocument();
   });
