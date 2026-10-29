@@ -71,17 +71,23 @@ server; inspect source changes manually when permission to validate is absent.
   displays only the like count, with no comments metric. The Account column is
   last in the results table.
 - `lib/instagram-apify.ts` is the explicit Deep thinking retrieval path, separate
-  from the Google path and selected in the chat composer. It uses the documented
-  keyword/hashtag inputs of `apify/instagram-hashtag-scraper`; no profile-timeline
-  or exhaustive-search capability is implied. Keep the configured actor ID
-  validated against the request schema this integration sends. It makes one
-  bounded Actor run per submitted query: `resultsLimit` is a result cap, not
-  pagination; do not present an unused page-count setting as working pagination
-  or silently add extra paid runs. Filter returned timestamps locally to the
-  selected window because this Actor does not document exact from/to inputs.
-  Apify credentials must remain server-only and Deep thinking failures must never
-  fall through to Google/SerpAPI. Deep thinking initially displays 10 existing
-  rows; Show more reveals already-fetched rows without another Actor run.
+  from the Google path and selected in the chat composer. Exact `#tag` and
+  "hashtag TAG" requests must bypass model classification and use
+  `apify/instagram-hashtag-scraper` with `hashtags: [tag]` and
+  `keywordSearch: false`; never substitute an account/profile search. Keyword
+  mode remains for people/brands and does not imply posts authored by that name.
+  `lib/providers/apify-instagram.ts` starts one bounded Actor run, checks its
+  terminal status, then pages the run's dataset by offset/limit under separate
+  actor-result, dataset-item, and timeout bounds. Surface actor caps, dataset
+  caps, timeouts, and later-page failures as incomplete coverage. Count only
+  deduplicated post/reel URLs with timestamps in the selected window; exclude
+  profile, hashtag, comment, undated, and out-of-window rows from the post count.
+  The Hashtag Scraper does not document exact from/to inputs, so retain the
+  requested window and disclose possible under-coverage. Never infer a hashtag
+  total from scraped rows; a displayed post count is provider-returned unique
+  posts in the window. Credentials stay server-only, and Deep thinking failures
+  must never fall through to Google/SerpAPI. The table initially displays 10
+  fetched rows; Show more reveals the already-fetched dataset without a new run.
 
 ## Conventions and gotchas
 
@@ -114,11 +120,15 @@ server; inspect source changes manually when permission to validate is absent.
 Copy `.env.example` to `.env.local`. `GEMINI_API_KEY` (AI analysis) and
 `SERPAPI_API_KEY` (retrieval, also Instagram profiles) enable Google mode;
 without them the app runs in a clearly-labelled degraded mode. `NEWSAPI_API_KEY`
-is optional. Deep thinking additionally requires server-side `APIFY_API_TOKEN`
-and `APIFY_INSTAGRAM_ACTOR_ID=apify/instagram-hashtag-scraper`; the optional
-`TUBITEX_APIFY_MAX_RESULTS` and `TUBITEX_APIFY_TIMEOUT_MS` bound its single
-Actor run. The Apify token must never enter client code or logs. Missing Deep
-thinking setup or retrieval errors must be explicit, with no Google fallback.
+is optional. Deep thinking additionally requires server-side `APIFY_API_TOKEN`;
+`APIFY_INSTAGRAM_HASHTAG_SCRAPER_ACTOR_ID` defaults to
+`apify/instagram-hashtag-scraper` (`APIFY_INSTAGRAM_ACTOR_ID` remains a legacy
+alias). `TUBITEX_APIFY_MAX_RESULTS_PER_ACTOR`,
+`TUBITEX_APIFY_MAX_DATASET_ITEMS_PER_RUN`,
+`TUBITEX_APIFY_DATASET_PAGE_SIZE`, and `TUBITEX_APIFY_TIMEOUT_MS` are separate
+bounds; optional `TUBITEX_APIFY_MAX_TOTAL_CHARGE_USD` adds an Actor-run charge
+ceiling. The Apify token must never enter client code or logs. Missing setup or
+retrieval errors must be explicit, with no Google fallback.
 Tuning variables (`TUBITEX_*`, including `TUBITEX_MAX_INSTAGRAM_QUERIES` and
 `TUBITEX_MAX_INSTAGRAM_PROFILES`) are documented in `.env.example`.
 

@@ -148,9 +148,13 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
           />
         ) : null}
         <MetricCard
-          label={retrievalSource === "apify" ? "Posts retrieved" : "Posts found"}
+          label={retrievalSource === "apify" ? "Posts in selected window" : "Posts found"}
           value={data.posts.length.toLocaleString("en-US")}
-          description="Unique posts fetched; Show more reveals additional rows without another search."
+          description={
+            retrievalSource === "apify"
+              ? "Unique posts whose timestamps fall inside the selected window; Show more reveals additional rows without another search."
+              : "Unique posts fetched; Show more reveals additional rows without another search."
+          }
         />
       </div>
 
@@ -260,8 +264,9 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
             ) : null}
             </>
           ) : (
-            <div className="px-5 pb-5 text-sm text-muted-foreground">
-              No posts were returned for this search window.
+            <div className="space-y-1 px-5 pb-5 text-sm text-muted-foreground">
+              <p>{data.emptyNote ?? "No posts were returned for this search window."}</p>
+              <p className="text-xs">Posts outside the selected window are excluded, not counted.</p>
             </div>
           )}
         </CardContent>

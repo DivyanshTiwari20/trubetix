@@ -114,6 +114,7 @@ export const instagramResultsViewSchema = z.object({
   }).nullable().optional(),
   estimateError: z.string().nullable().optional(),
   isCountRequest: z.boolean(),
+  emptyNote: z.string().nullable().optional(),
   posts: z.array(instagramPostViewSchema),
 });
 

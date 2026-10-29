@@ -132,13 +132,24 @@ export function getNewsApiKey(): string | null {
 
 export function getApifyInstagramConfig(): ApifyInstagramConfig | null {
   const apiToken = readString("APIFY_API_TOKEN");
-  const actorId = readString("APIFY_INSTAGRAM_ACTOR_ID");
-  if (!apiToken || !actorId) return null;
+  const actorId = readString("APIFY_INSTAGRAM_HASHTAG_SCRAPER_ACTOR_ID")
+    ?? readString("APIFY_INSTAGRAM_ACTOR_ID")
+    ?? "apify/instagram-hashtag-scraper";
+  if (!apiToken) return null;
+  const maxResultsPerActor = readInt("TUBITEX_APIFY_MAX_RESULTS_PER_ACTOR", 1_000, 1, 1_000);
+  const maxDatasetItems = readInt("TUBITEX_APIFY_MAX_DATASET_ITEMS_PER_RUN", 3_000, 1, 10_000);
+  const chargeCapRaw = readString("TUBITEX_APIFY_MAX_TOTAL_CHARGE_USD");
+  const chargeCap = chargeCapRaw ? Number.parseFloat(chargeCapRaw) : Number.NaN;
   return {
     apiToken,
     actorId,
-    maxResults: readInt("TUBITEX_APIFY_MAX_RESULTS", 50, 1, 100),
-    timeoutMs: readInt("TUBITEX_APIFY_TIMEOUT_MS", 45_000, 5_000, 120_000),
+    maxResultsPerActor,
+    maxDatasetItems,
+    datasetPageSize: readInt("TUBITEX_APIFY_DATASET_PAGE_SIZE", 250, 1, Math.min(1_000, maxDatasetItems)),
+    timeoutMs: readInt("TUBITEX_APIFY_TIMEOUT_MS", 120_000, 5_000, 300_000),
+    maxTotalChargeUsd: Number.isFinite(chargeCap) && chargeCap > 0
+      ? Math.min(chargeCap, 100)
+      : null,
   };
 }
 
