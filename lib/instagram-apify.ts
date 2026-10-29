@@ -17,7 +17,11 @@ const extractionSchema = z.object({
   intent: z.enum(["count", "narrative"]),
 });
 
-const answerSchema = z.object({ answer: z.string() });
+const answerSchema = z.object({
+  intro: z.string(),
+  answer: z.string(),
+  followUp: z.string(),
+});
 
 interface ApifyPostView {
   title: string;
@@ -215,28 +219,48 @@ function parsePost(value: unknown, range: ResolvedDateRangeApp): PostParseResult
   };
 }
 
-function ensureFollowUp(answer: string, intent: "count" | "narrative"): string {
-  const trimmed = answer.trim();
-  if (!trimmed || /\?\s*$/.test(trimmed)) return trimmed;
-  const followUp = intent === "count"
-    ? "Want me to narrow this by date range or search term?"
-    : `Want me to focus on a theme or account in these results?`;
-  return `${trimmed}\n\n${followUp}`;
+function defaultIntro(query: string, rangeLabel: string, count: number): string {
+  return count > 0
+    ? `Let's look at the Instagram conversation around ${query} for ${rangeLabel}. I've gathered the posts I could find in this window so we can read the captions, accounts, likes, hashtags, and posting dates together.`
+    : `Let's look at what's happening around ${query} for ${rangeLabel}. I checked for public Instagram posts in this window so we can see whether there is a conversation worth acting on.`;
 }
 
-function deterministicAnswer(
+function defaultFollowUp(intent: "count" | "narrative"): string {
+  return intent === "count"
+    ? "Would you like me to narrow this down by date range or search term?"
+    : "Would you like me to focus on a theme or account in these results?";
+}
+
+function normalizeFollowUp(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.endsWith("?") ? trimmed : fallback;
+}
+
+function deterministicConversation(
   intent: "count" | "narrative",
   count: number,
   query: string,
   rangeLabel: string,
-): string {
+): { intro: string; answer: string; followUp: string } {
   if (count === 0) {
-    return `The retrieved dataset contains 0 unique, timestamped Instagram post records for "${query}" in ${rangeLabel}. This is not an Instagram-wide total. Want me to widen the date range or refine the term?`;
+    return {
+      intro: defaultIntro(query, rangeLabel, 0),
+      answer: `No posts with a usable timestamp came back for "${query}" in ${rangeLabel}. That doesn't mean the conversation is silent — the window may simply be too narrow or the term may need adjusting.`,
+      followUp: "Would you like me to widen the date range or refine the search term?",
+    };
   }
   if (intent === "count") {
-    return `Apify returned ${count} unique Instagram post records for "${query}" in ${rangeLabel}. This is the retrieved result count, not an Instagram-wide total. Want me to narrow it by date or search term?`;
+    return {
+      intro: defaultIntro(query, rangeLabel, count),
+      answer: `I'm showing ${count} Instagram ${count === 1 ? "post" : "posts"} for "${query}" from ${rangeLabel}. This is the number shown for this window, not an Instagram-wide total.`,
+      followUp: defaultFollowUp(intent),
+    };
   }
-  return `I found ${count} unique Instagram post records for "${query}" in ${rangeLabel}. They are shown below; this is provider coverage, not an Instagram-wide count. Want me to focus on a theme or account?`;
+  return {
+    intro: defaultIntro(query, rangeLabel, count),
+    answer: `I'm showing ${count} Instagram ${count === 1 ? "post" : "posts"} for "${query}" from ${rangeLabel}. They are below so we can look at the captions, hashtags, dates, and engagement together. This reflects the posts in this window, not every Instagram post.`,
+    followUp: defaultFollowUp(intent),
+  };
 }
 
 function makeMeta(
@@ -252,6 +276,7 @@ function makeMeta(
   providerAttempted: boolean,
   dedupedCount: number,
   emptyNote: string | null,
+  conversation?: { intro: string; answer: string; followUp: string } | null,
 ): ResearchMeta {
   const integrations = getIntegrationStatus();
   return {
@@ -284,6 +309,13 @@ function makeMeta(
       isCountRequest: intent === "count",
       retrievalSource: "apify",
       emptyNote,
+      ...(conversation
+        ? {
+            intro: conversation.intro,
+            summary: conversation.answer,
+            followUp: conversation.followUp,
+          }
+        : {}),
       posts: postViews,
     },
   };
@@ -329,21 +361,21 @@ export async function runApifyInstagramResearch(
 
   if (!config) {
     return makeEmpty(
-      "Deep thinking is not configured. Set APIFY_API_TOKEN on the server; the Instagram Hashtag Scraper actor has a safe default and can be overridden with APIFY_INSTAGRAM_HASHTAG_SCRAPER_ACTOR_ID. No Google/SerpAPI fallback was used.",
-      ["APIFY_API_TOKEN is required; the reviewed Hashtag Scraper actor ID defaults safely."],
+      "Deep search is not configured in this workspace. Add the missing search credentials on the server, then try again.",
+      ["Deep search is not configured."],
     );
   }
   const requestedHashtag = explicitHashtag(question);
   if (!gemini && !requestedHashtag) {
     return makeEmpty(
-      "Deep thinking needs GEMINI_API_KEY to interpret this question. No Apify run or Google/SerpAPI fallback was started.",
-      ["GEMINI_API_KEY is required to interpret person/brand keyword queries."],
+      "Deep search needs AI analysis to interpret this question. Configure AI analysis in this workspace, then try again.",
+      ["AI analysis is required to interpret person and brand searches."],
     );
   }
   if (config.actorId.replace(/[~/]/g, "/").toLowerCase() !== "apify/instagram-hashtag-scraper") {
     return makeEmpty(
-      "Deep thinking hashtag and keyword searches require the configured Instagram Hashtag Scraper. Set APIFY_INSTAGRAM_HASHTAG_SCRAPER_ACTOR_ID to apify/instagram-hashtag-scraper; no Google/SerpAPI fallback was used.",
-      ["The configured Actor ID does not match the input schema this integration sends."],
+      "Deep search is not set up correctly in this workspace. Update the server search configuration, then try again.",
+      ["The configured search integration does not match the expected input format."],
     );
   }
 
@@ -359,7 +391,7 @@ export async function runApifyInstagramResearch(
       if (!gemini) throw new Error("Gemini is required to interpret this query.");
       const prior = promptHistory(history.filter((turn) => turn.content.trim() !== question.trim()));
       const extraction = await gemini.generateStructured({
-        systemInstruction: `You identify the single Instagram search term in a user's natural-language request. Use the current message first and conversation history only to resolve a clear follow-up. Return query as the person, brand, or hashtag itself, never the whole question. Use searchType "hashtag" only when the user explicitly asks about or supplies a hashtag; otherwise use "keyword" for a person's or brand's name. Do not invent a profile handle or claim profile-timeline search. A keyword query uses Apify's documented Instagram keyword-search mode. Classify a direct request for a number of retrieved posts as count; otherwise narrative. If there is no search target, return query null.`,
+        systemInstruction: `You identify the single Instagram search term in a user's natural-language request. Use the current message first and conversation history only to resolve a clear follow-up. Return query as the person, brand, or hashtag itself, never the whole question. Use searchType "hashtag" only when the user explicitly asks about or supplies a hashtag; otherwise use "keyword" for a person's or brand's name. Do not invent a profile handle or claim profile-timeline search. A keyword query uses the Instagram keyword-search mode. Classify a direct request for a number of retrieved posts as count; otherwise narrative. If there is no search target, return query null.`,
         userContent: `Current message: ${question}\n\nPrior conversation:\n${prior || "(none)"}`,
         responseSchema: toGeminiSchema(extractionSchema),
         temperature: 0,
@@ -374,7 +406,7 @@ export async function runApifyInstagramResearch(
       error: error instanceof Error ? error.message : "unknown",
     });
     return makeEmpty(
-      "I couldn't interpret that Instagram search. Please name a person, brand, or hashtag; no Apify run or Google/SerpAPI fallback was started.",
+      "I couldn't interpret that Instagram search. Please name a person, brand, or hashtag.",
       ["Question parsing failed before retrieval."],
     );
   }
@@ -412,9 +444,9 @@ export async function runApifyInstagramResearch(
     });
     return makeEmpty(
       status === 401 || status === 403
-        ? "Apify rejected the request. Check the server token and Actor access, then try again. No Google/SerpAPI fallback was used."
-        : "Apify could not complete this Instagram search. Try again later or check the Actor configuration; no Google/SerpAPI fallback was used.",
-      ["Apify retrieval failed; no other provider was used."],
+        ? "The Instagram search could not authenticate. Check the server search configuration, then try again."
+        : "The Instagram search could not complete just now. Please try again in a moment.",
+      ["Retrieval failed; no alternate source was used."],
       true,
       displayQuery,
     );
@@ -466,15 +498,15 @@ export async function runApifyInstagramResearch(
     );
   }
   const emptyNote = postViews.length === 0 && dateFiltered > 0
-    ? `No returned posts fall inside ${range.label}. Apify returned ${dateFiltered} dated post record(s)${outOfWindowSpan ? ` spanning ${outOfWindowSpan}` : ""}, all outside the selected window. The window was not widened; choose a wider date range such as Last 30 days to include them.`
+    ? `No returned posts fall inside ${range.label}. The search found ${dateFiltered} dated post(s)${outOfWindowSpan ? ` spanning ${outOfWindowSpan}` : ""}, all outside the selected window. The window was not widened; choose a wider date range such as Last 30 days to include them.`
     : null;
   const limitations = [
-    "Apify keyword/hashtag search covers provider-returned public results, not every Instagram post or an Instagram-wide total.",
-    "This Actor does not document exact from/to date-window input; returned timestamps are filtered locally, so older or narrow windows can be under-covered.",
-    "A narrow selected window can show 0 posts even when the Actor returned posts outside it; those posts are excluded and never counted as if they were in the window.",
-    "Show more reveals rows already fetched in the paged dataset; it does not launch another Actor run.",
-    "No separate hashtag-wide total is inferred from scraped rows; the displayed count is unique post records returned in the selected window.",
-    "Account attribution and hashtags are displayed only when present in returned post metadata or captions.",
+    "Instagram results reflect public posts found in this search, not every Instagram post or an Instagram-wide total.",
+    "The search does not support an exact date-window input, so returned timestamps are filtered locally and older or narrow windows can be under-covered.",
+    "A narrow selected window can show 0 posts even when posts outside it were returned; those posts are excluded and never counted as if they were in the window.",
+    "Show more reveals rows already fetched in this search; it does not start a new search.",
+    "No separate hashtag-wide total is inferred from the results; the displayed count is unique posts found in the selected window.",
+    "Account attribution and hashtags are displayed only when present in the returned post details or captions.",
   ];
 
   logger.info("Apify Instagram retrieval summary", {
@@ -496,39 +528,48 @@ export async function runApifyInstagramResearch(
     nonPostRows,
   });
 
-  let message = deterministicAnswer(extracted.intent, postViews.length, displayQuery, range.label);
+  let conversation = deterministicConversation(extracted.intent, postViews.length, displayQuery, range.label);
   if (gemini && postViews.length > 0 && extracted.intent !== "count") {
     try {
       const postsText = postViews.slice(0, 25).map((post, index) =>
         `${index + 1}. ${post.title}; account ${post.account}; date ${post.postedDate ?? "unknown"}; likes ${post.likes ?? "not returned"}; caption ${post.snippet}`,
       ).join("\n");
       const answer = await gemini.generateStructured({
-        systemInstruction: `You are Tubitex, a warm, concise Instagram analyst. Answer the current question in natural language using only the supplied Apify posts and prior conversation. Attribute observations to the posts, never treat allegations as facts, and never claim these are all Instagram posts. For a count question, state only the number of unique posts returned in this search window, not an Instagram-wide total. For other questions, do not invent counts or details. Keep the answer focused and finish with one useful follow-up question.`,
-        userContent: `Current question: ${question}\nSearch term: ${displayQuery}\nSelected date window: ${range.label}\nUnique posts returned within the window: ${postViews.length}\n\nConversation:\n${promptHistory(history.filter((turn) => turn.content.trim() !== question.trim())) || "(none)"}\n\nApify Instagram posts:\n${postsText}`,
+        systemInstruction: `You are Tubitex, a warm, sharp PR and social media intelligence assistant. You help communications teams understand public Instagram conversation. Speak like a kind, calm expert: clear natural English, short sentences, warm but direct, no corporate jargon, no emoji. Never open with filler like "Certainly" or "Great question".
+
+Write the reply in three parts:
+- intro: 1-2 conversational sentences that acknowledge the user's request and frame what the results cover, mentioning the subject and date window naturally. This appears before the results table.
+- answer: 2-5 short sentences (or a few bullets only if genuinely useful) that answer the current question using only the supplied posts and prior conversation. Attribute observations to the posts, say "reported" for allegations, and never claim these are all Instagram posts or an Instagram-wide total.
+- followUp: one short, specific question that helps the user decide the next step.
+
+Never mention search engines, APIs, scraping tools, data vendors, providers, or how the results were retrieved. Refer only to "these posts", "this search window", or "the results below". Do not invent counts, dates, accounts, captions, engagement, or other facts. For a count question, state only the number of unique posts found in this search window.`,
+        userContent: `Current question: ${question}\nSearch term: ${displayQuery}\nSelected date window: ${range.label}\nUnique posts found within the window: ${postViews.length}\n\nConversation:\n${promptHistory(history.filter((turn) => turn.content.trim() !== question.trim())) || "(none)"}\n\nInstagram posts:\n${postsText}`,
         responseSchema: toGeminiSchema(answerSchema),
-        temperature: 0.2,
+        temperature: 0.4,
         signal,
       });
       const parsed = answerSchema.safeParse(answer);
       if (parsed.success && parsed.data.answer.trim()) {
-        message = ensureFollowUp(parsed.data.answer, extracted.intent);
+        conversation = {
+          intro: parsed.data.intro.trim() || conversation.intro,
+          answer: parsed.data.answer.trim(),
+          followUp: normalizeFollowUp(parsed.data.followUp, conversation.followUp),
+        };
       } else {
-        warnings.push("Gemini returned an unusable answer; a plain result summary is shown instead.");
+        warnings.push("The narrative summary could not be generated; a plain result summary is shown instead.");
       }
     } catch (error) {
       logger.warn("Deep Instagram answer generation failed", {
         error: error instanceof Error ? error.message : "unknown",
       });
-      warnings.push("Gemini answer generation failed; a plain result summary is shown instead.");
+      warnings.push("The narrative summary could not be generated; a plain result summary is shown instead.");
     }
   }
 
   if (!gemini && postViews.length > 0 && extracted.intent !== "count") {
-    warnings.push("Gemini is not configured; a plain grounded result summary is shown.");
+    warnings.push("AI analysis is not configured; a plain result summary is shown.");
   }
-  if (warnings.length > 0) {
-    message = `${message}\n\nCoverage note: ${warnings.join(" ")}`;
-  }
+  const message = `${conversation.intro}\n\n${conversation.answer}\n\n${conversation.followUp}`;
 
   return {
     message,
@@ -546,6 +587,7 @@ export async function runApifyInstagramResearch(
       true,
       postViews.length,
       emptyNote,
+      conversation,
     ),
   };
 }

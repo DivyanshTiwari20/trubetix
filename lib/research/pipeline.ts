@@ -562,11 +562,11 @@ function buildLimitations(args: {
   ];
   if (args.providers.length === 0) {
     limitations.push(
-      "Live retrieval is unavailable because no search provider is configured (set SERPAPI_API_KEY).",
+      "Live search is unavailable because it is not configured in this workspace.",
     );
   }
   if (!args.integrations.gemini.configured) {
-    limitations.push("AI synthesis is unavailable because GEMINI_API_KEY is not configured.");
+    limitations.push("AI analysis is unavailable because it is not configured in this workspace.");
   }
   if (args.undatedExcluded > 0) {
     limitations.push(
@@ -576,7 +576,7 @@ function buildLimitations(args: {
   if (args.mode !== "general") {
     if (args.socialIncluded) {
       limitations.push(
-        "Instagram results are a sampled view of public, Google-indexed content. Captions, counts and dates may be incomplete or stale and are not comprehensive Instagram analytics.",
+        "Instagram results are a sampled view of public content found in this search. Captions, counts and dates may be incomplete or stale and are not comprehensive Instagram analytics.",
       );
       limitations.push(
         "Engagement metrics are shown only when the retrieved page supplied them; missing counts are unknown, not zero.",
@@ -596,7 +596,7 @@ function buildLimitations(args: {
     }
     if (args.platform === null && args.socialIncluded) {
       limitations.push(
-        "No platform was named, so discovery was limited to Instagram, the only platform with dork-based retrieval.",
+        "No platform was named, so discovery was limited to Instagram.",
       );
     }
     if (args.unsupportedPlatform) {
@@ -606,7 +606,7 @@ function buildLimitations(args: {
     }
     if (args.profileRequested && !args.profileAvailable) {
       limitations.push(
-        "Instagram profile data is unavailable because no SERPAPI_API_KEY is configured.",
+        "Instagram profile data is unavailable because profile search is not configured in this workspace.",
       );
     }
   }
@@ -617,7 +617,7 @@ function buildLimitations(args: {
   }
   if (args.providerErrors.length > 0) {
     limitations.push(
-      `${args.providerErrors.length} provider request(s) failed and were skipped. Some coverage may be missing.`,
+      "Some searches could not complete, so coverage may be missing.",
     );
   }
   return limitations;
@@ -631,7 +631,7 @@ function degradedMessage(args: {
   const lines: string[] = ["Unable to produce a full research briefing."];
   if (args.providerCount === 0) {
     lines.push(
-      "Live web and news retrieval is not configured. Add a SERPAPI_API_KEY to enable research.",
+      "Live search is not configured in this workspace, so there is no evidence to analyse yet.",
     );
   } else if (args.sourceCount === 0) {
     lines.push(
@@ -640,7 +640,7 @@ function degradedMessage(args: {
   }
   if (!args.integrations.gemini.configured) {
     lines.push(
-      "AI synthesis is not configured. Add a GEMINI_API_KEY to generate narrative analysis and recommendations.",
+      "AI analysis is not configured, so narrative analysis and recommendations are unavailable.",
     );
   }
   lines.push(
@@ -670,13 +670,13 @@ function noSocialMessage(args: {
   const lines = [
     `No relevant ${platformLabel} posts or Reels were found for "${args.subject}" in the requested window.`,
     args.discoveryQueries.length > 0
-      ? `Tubitex ran ${args.discoveryQueries.length} targeted ${platformLabel} queries and rejected results that did not mention the subject or contained no usable post content.`
-      : "Tubitex could not run social discovery searches for this request.",
+      ? `Tubitex checked ${args.discoveryQueries.length} targeted angles and rejected results that did not mention the subject or contained no usable post content.`
+      : "Tubitex could not check social coverage for this request.",
     "It does not substitute unrelated news articles, Facebook pages or Instagram profiles for social media analysis.",
     "Try widening the time window, naming a specific account or hashtag, or asking about a more active subject.",
   ];
   if (!args.geminiConfigured) {
-    lines.push("AI synthesis is also unavailable because GEMINI_API_KEY is not configured.");
+    lines.push("AI analysis is also unavailable because it is not configured in this workspace.");
   }
   return lines.join(" ");
 }
@@ -941,7 +941,7 @@ export async function runResearch(
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([day, count]) => `${day}: ${count}`)
         .join(", ");
-      message = `${subject}: at least ${postCount} Instagram posts found in ${rangeLabel}. Based on Google-indexed posts; the real number is likely higher.`;
+      message = `${subject}: at least ${postCount} Instagram posts found in ${rangeLabel}. Based on the posts found in this search; the real number is likely higher.`;
       if (perDayEntries) {
         message += ` Posts per day: ${perDayEntries}.`;
       }
@@ -1071,14 +1071,14 @@ export async function runResearch(
       ...metaBase,
       status: "degraded",
       limitations,
-      warnings: [`Analysis failed: ${detail}`],
+      warnings: ["AI analysis could not complete for this request."],
     };
     return {
       status: "degraded",
       analysis: null,
       sources: evidence,
       meta,
-      message: `Research completed but the analysis step failed (${detail}). The retrieved sources are shown below.`,
+      message: "Research completed, but the AI analysis step could not run. The retrieved sources are shown below so you can still review them.",
     };
   }
 }

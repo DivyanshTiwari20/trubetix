@@ -115,9 +115,6 @@ export function ChatComposer({ value, onChange, inputRef }: ChatComposerProps) {
       <p className="sr-only" aria-live="polite">
         {isGenerating ? "Research in progress. Use Stop to cancel." : ""}
       </p>
-      <p className="px-2 pb-0.5 text-[11px] text-muted-foreground">
-        Enter to send · Shift + Enter for a new line
-      </p>
     </form>
   );
 }

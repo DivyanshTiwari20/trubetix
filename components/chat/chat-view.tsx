@@ -23,7 +23,7 @@ export function ChatView() {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-8">
         <EmptyState onSelectPrompt={handleSelectPrompt} />
-        <div className="mt-6 w-full max-w-2xl">
+        <div className="mt-6 w-full max-w-[42rem]">
           <ChatComposer value={draft} onChange={setDraft} inputRef={inputRef} />
         </div>
       </div>
@@ -36,7 +36,7 @@ export function ChatView() {
         <MessageList messages={messages} />
       </div>
       <div className="border-t border-border bg-background/85 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/70">
-        <div className="mx-auto w-full max-w-3xl">
+        <div className="mx-auto w-full max-w-[42rem]">
           <ChatComposer value={draft} onChange={setDraft} inputRef={inputRef} />
         </div>
       </div>

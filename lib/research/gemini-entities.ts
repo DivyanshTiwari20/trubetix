@@ -30,7 +30,7 @@ export function validateEntity(entity: string | null): string | null {
   return trimmed;
 }
 
-const EXTRACTION_SYSTEM_INSTRUCTION = `You are an entity extraction assistant for a PR intelligence chatbot.
+const EXTRACTION_SYSTEM_INSTRUCTION = `You are an entity extraction assistant for Tubitex, a PR and social media intelligence app.
 
 Extract the primary entity (person, brand, film, event, hashtag) the user wants posts or numbers for.
 The message may contain typos, slang, mixed language, or filler words.

@@ -39,7 +39,7 @@ function PostCountResults({ sources }: { sources: ResearchResult[] }) {
           </div>
           {!hasLikes && popularPosts.length > 0 && (
             <p className="mt-2 text-xs text-muted-foreground">
-              Likes are shown only where Google displays them. Sorted by newest as fallback.
+              Likes are shown only when the source provides them. Sorted by newest as fallback.
             </p>
           )}
         </AnalysisSection>
@@ -131,17 +131,38 @@ export function AssistantMessage({
   const instagramResults = message.meta?.instagramResults;
 
   if (instagramResults) {
+    const intro = instagramResults.intro?.trim() ?? "";
+    const summary = instagramResults.summary?.trim() ?? "";
+    const followUp = instagramResults.followUp?.trim() ?? "";
+    const hasConversation = Boolean(intro || summary || followUp);
+
     return (
       <div className="space-y-4">
-        {message.content.trim() ? (
-          <MarkdownContent content={message.content} className="mt-2 text-sm" />
-        ) : analysis ? (
-          <p className="text-sm leading-relaxed">{analysis.executiveSummary}</p>
-        ) : null}
-        <InstagramResults
-          key={`${message.id}-${message.meta?.generatedAt ?? ""}`}
-          data={instagramResults}
-        />
+        {hasConversation ? (
+          <>
+            {intro ? <MarkdownContent content={intro} className="mt-2 text-sm" /> : null}
+            <InstagramResults
+              key={`${message.id}-${message.meta?.generatedAt ?? ""}`}
+              data={instagramResults}
+            />
+            {summary ? <MarkdownContent content={summary} className="text-sm" /> : null}
+            {followUp ? (
+              <p className="text-sm leading-relaxed text-muted-foreground">{followUp}</p>
+            ) : null}
+          </>
+        ) : (
+          <>
+            {message.content.trim() ? (
+              <MarkdownContent content={message.content} className="mt-2 text-sm" />
+            ) : analysis ? (
+              <p className="text-sm leading-relaxed">{analysis.executiveSummary}</p>
+            ) : null}
+            <InstagramResults
+              key={`${message.id}-${message.meta?.generatedAt ?? ""}`}
+              data={instagramResults}
+            />
+          </>
+        )}
         {actions}
       </div>
     );

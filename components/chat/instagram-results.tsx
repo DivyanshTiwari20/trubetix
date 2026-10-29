@@ -1,10 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink } from "lucide-react";
 import type { InstagramResultsView } from "@/types";
 import { formatCompactCount } from "@/lib/format";
-import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -26,12 +24,6 @@ const POSTS_PER_REVEAL = 10;
 
 function available(value: string | null | undefined): string {
   return value?.trim() ? value : "Unavailable";
-}
-
-function formatAccount(value: string | null | undefined): string {
-  const raw = (value ?? "").trim().replace(/^@/, "");
-  if (!raw || raw.toLowerCase() === "unknown") return "Unavailable";
-  return /^[A-Za-z0-9._]+$/.test(raw) ? `@${raw}` : raw;
 }
 
 function formatLikeCount(value: string | null | undefined): string {
@@ -75,7 +67,7 @@ function MetricCard({
 }: {
   label: string;
   value: string;
-  description: string;
+  description?: string;
 }) {
   return (
     <Card className="border-border/80 shadow-sm">
@@ -83,42 +75,37 @@ function MetricCard({
         <CardDescription className="font-medium text-foreground">{label}</CardDescription>
         <CardTitle className="text-3xl tabular-nums tracking-tight">{value}</CardTitle>
       </CardHeader>
-      <CardContent>
-        <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
-      </CardContent>
+      {description ? (
+        <CardContent>
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        </CardContent>
+      ) : null}
     </Card>
   );
 }
 
 function HashtagList({ tags }: { tags: string[] }) {
-  if (!tags.length) return <span className="text-sm text-muted-foreground">None found</span>;
+  if (!tags.length) return <span className="text-muted-foreground">—</span>;
 
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="flex flex-col gap-0.5">
       {tags.map((tag, index) => (
-        <Badge key={`${tag}-${index}`} variant="secondary" className="max-w-full break-all font-normal">
+        <span key={`${tag}-${index}`} className="break-all">
           {tag.startsWith("#") ? tag : `#${tag}`}
-        </Badge>
+        </span>
       ))}
     </div>
   );
 }
 
-function PreviewField({ label, text }: { label: string; text: string }) {
+function PreviewText({ caption, snippet }: { caption: string; snippet: string }) {
+  const text = caption || snippet;
+  if (!text) return <span className="text-muted-foreground">Preview unavailable</span>;
+
   return (
-    <div className="space-y-1">
-      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
-      <p className="line-clamp-3 whitespace-pre-wrap break-words leading-relaxed">{text}</p>
-      {text.length > 180 ? (
-        <details className="group">
-          <summary className="cursor-pointer list-none text-xs font-medium text-primary marker:hidden">
-            <span className="group-open:hidden">Read more</span>
-            <span className="hidden group-open:inline">Show less</span>
-          </summary>
-          <p className="mt-2 whitespace-pre-wrap break-words leading-relaxed">{text}</p>
-        </details>
-      ) : null}
-    </div>
+    <p className="line-clamp-2 whitespace-pre-wrap break-words leading-relaxed" title={text}>
+      {text}
+    </p>
   );
 }
 
@@ -142,52 +129,48 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
       <div className={`grid gap-3 ${retrievalSource === "google" ? "sm:grid-cols-2" : ""}`}>
         {retrievalSource === "google" ? (
           <MetricCard
-            label="Google estimated search results"
+            label="Estimated matching results"
             value={estimate}
-            description="Approximate results indexed by Google for this search window."
+            description="Approximate number of results for this search window."
           />
         ) : null}
         <MetricCard
-          label={retrievalSource === "apify" ? "Posts in selected window" : "Posts found"}
-          value={data.posts.length.toLocaleString("en-US")}
-          description={
-            retrievalSource === "apify"
-              ? "Unique posts whose timestamps fall inside the selected window; Show more reveals additional rows without another search."
-              : "Unique posts fetched; Show more reveals additional rows without another search."
-          }
+          label="Showing"
+          value={`${data.posts.length.toLocaleString("en-US")} ${data.posts.length === 1 ? "post" : "posts"}`}
         />
       </div>
 
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        {retrievalSource === "google"
-          ? "Google's estimate is approximate and is not an Instagram-wide post count."
-          : "Apify keyword/hashtag results are provider-limited, not an Instagram-wide post count; the selected date window is applied to returned timestamps."}
-      </p>
-
-      <Card className="overflow-hidden shadow-sm">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Retrieved posts</CardTitle>
-          <CardDescription>Unique results from this search; long previews can be expanded.</CardDescription>
-        </CardHeader>
-        <CardContent className="p-0">
-          {data.posts.length ? (
-            <>
-            <Table className="min-w-[1200px]">
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          <h3 className="text-sm font-semibold">Retrieved posts</h3>
+          <p className="text-xs text-muted-foreground">Unique results from this search.</p>
+        </div>
+        {data.posts.length ? (
+          <>
+            <Table className="min-w-[900px]">
               <TableHeader>
-                <TableRow className="bg-muted/40 hover:bg-muted/40">
-                  <TableHead className="w-[190px]">Post</TableHead>
-                  <TableHead className="w-[380px]">Preview</TableHead>
-                  <TableHead className="w-[180px]">Likes</TableHead>
-                  <TableHead className="w-[190px]">Hashtags</TableHead>
-                  <TableHead className="w-[130px]">Posted</TableHead>
-                  <TableHead className="w-[130px]">Account</TableHead>
+                <TableRow className="border-b border-border hover:bg-transparent">
+                  <TableHead className="h-auto w-[170px] px-3 py-3 text-sm font-medium text-foreground">
+                    Post
+                  </TableHead>
+                  <TableHead className="h-auto w-[320px] px-3 py-3 text-sm font-medium text-foreground">
+                    Preview
+                  </TableHead>
+                  <TableHead className="h-auto w-[90px] px-3 py-3 text-sm font-medium text-foreground">
+                    Likes
+                  </TableHead>
+                  <TableHead className="h-auto w-[150px] px-3 py-3 text-sm font-medium text-foreground">
+                    Hashtags
+                  </TableHead>
+                  <TableHead className="h-auto w-[120px] px-3 py-3 text-sm font-medium text-foreground">
+                    Posted
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {visiblePosts.map((post, index) => {
                   const postUrl = safeInstagramUrl(post.url);
                   const title = readablePostTitle(post.title);
-                  const account = formatAccount(post.account);
                   const caption = post.caption?.trim() ?? "";
                   const snippet = post.snippet?.trim() ?? "";
                   const hashtags = [...new Map(
@@ -195,8 +178,11 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
                   ).values()];
 
                   return (
-                    <TableRow key={post.url || index} className="align-top">
-                      <TableCell className="whitespace-normal break-words">
+                    <TableRow
+                      key={post.url || index}
+                      className="border-b border-border/70 align-top hover:bg-transparent"
+                    >
+                      <TableCell className="whitespace-normal break-words px-3 py-4">
                         {postUrl ? (
                           <a
                             href={postUrl}
@@ -204,51 +190,33 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
                             rel="noopener noreferrer"
                             title={title}
                             aria-label={`Open Instagram post: ${title}`}
-                            className="inline-flex max-w-full items-start gap-1 font-medium text-primary underline-offset-4 hover:underline"
+                            className="font-medium text-foreground underline-offset-4 hover:underline"
                           >
                             <span className="line-clamp-2 break-words">{title}</span>
-                            <ExternalLink className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
                           </a>
                         ) : (
                           <span className="font-medium">{title}</span>
                         )}
                       </TableCell>
-                      <TableCell className="whitespace-normal break-words">
-                        <div className="max-w-[380px] space-y-3">
-                          {caption ? (
-                            <PreviewField label="Caption" text={caption} />
-                          ) : snippet ? (
-                            <PreviewField label="Search preview" text={snippet} />
-                          ) : (
-                            <span className="text-sm text-muted-foreground">Preview unavailable</span>
-                          )}
-                          {caption && snippet ? (
-                            <details className="group">
-                              <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground marker:hidden">
-                                Search preview
-                              </summary>
-                              <div className="mt-2 line-clamp-4 whitespace-pre-wrap break-words text-sm leading-relaxed">
-                                {snippet}
-                              </div>
-                            </details>
-                          ) : null}
-                        </div>
+                      <TableCell className="whitespace-normal break-words px-3 py-4">
+                        <PreviewText caption={caption} snippet={snippet} />
                       </TableCell>
-                      <TableCell className="whitespace-nowrap font-medium tabular-nums">
+                      <TableCell className="whitespace-nowrap px-3 py-4 tabular-nums">
                         {formatLikeCount(post.likes)}
                       </TableCell>
-                      <TableCell className="whitespace-normal break-words">
+                      <TableCell className="whitespace-normal break-words px-3 py-4">
                         <HashtagList tags={hashtags} />
                       </TableCell>
-                      <TableCell className="whitespace-normal break-words">{available(post.postedDate)}</TableCell>
-                      <TableCell className="whitespace-normal break-words">{account}</TableCell>
+                      <TableCell className="whitespace-normal break-words px-3 py-4">
+                        {available(post.postedDate)}
+                      </TableCell>
                     </TableRow>
                   );
                 })}
               </TableBody>
             </Table>
             {remainingPosts > 0 ? (
-              <div className="flex flex-col items-center gap-2 border-t px-4 py-4 sm:flex-row sm:justify-between">
+              <div className="flex flex-col items-center gap-2 border-t border-border px-3 py-4 sm:flex-row sm:justify-between">
                 <p className="text-xs text-muted-foreground" aria-live="polite">
                   Showing {visiblePosts.length.toLocaleString("en-US")} of {data.posts.length.toLocaleString("en-US")} posts
                 </p>
@@ -262,15 +230,14 @@ export function InstagramResults({ data }: { data: InstagramResultsView }) {
                 </button>
               </div>
             ) : null}
-            </>
-          ) : (
-            <div className="space-y-1 px-5 pb-5 text-sm text-muted-foreground">
-              <p>{data.emptyNote ?? "No posts were returned for this search window."}</p>
-              <p className="text-xs">Posts outside the selected window are excluded, not counted.</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+          </>
+        ) : (
+          <div className="space-y-1 py-4 text-sm text-muted-foreground">
+            <p>{data.emptyNote ?? "No posts were returned for this search window."}</p>
+            <p className="text-xs">Posts outside the selected window are excluded, not counted.</p>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

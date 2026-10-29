@@ -105,26 +105,6 @@ export function AppSidebar({
           <TooltipContent side="right">New chat</TooltipContent>
         </Tooltip>
         <Separator className="my-1" />
-        <ScrollArea className="w-full flex-1">
-          <div className="flex flex-col items-center gap-1 py-1">
-            {state.conversations
-              .filter((conversation) => showArchived === conversation.archived)
-              .slice(0, 12)
-              .map((conversation) => (
-                <ConversationItem
-                  key={conversation.id}
-                  conversation={conversation}
-                  collapsed
-                  isActive={conversation.id === state.activeId}
-                  onSelect={() => handleSelect(conversation.id)}
-                  onRename={(title) => renameConversation(conversation.id, title)}
-                  onTogglePin={() => togglePin(conversation.id)}
-                  onToggleArchive={() => toggleArchive(conversation.id)}
-                  onDelete={() => onRequestDeleteConversation(conversation)}
-                />
-              ))}
-          </div>
-        </ScrollArea>
         <SidebarFooter
           collapsed
           showArchived={showArchived}

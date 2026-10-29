@@ -916,57 +916,95 @@ interface GeminiAnalysisInput {
   postCount: number;
   intent: "count" | "narrative" | "show_more" | "chat" | "unclear" | "business_fit" | `business_fit:${string}` | "other";
   entity: string;
+  dateRangeLabel: string;
 }
 
 const analysisSchema = z.object({
+  intro: z.string(),
   answer: z.string(),
+  followUp: z.string(),
 });
+
+interface InstagramConversation {
+  intro: string;
+  answer: string;
+  followUp: string;
+}
+
+function defaultIntro(entity: string, dateRangeLabel: string, postCount: number): string {
+  return postCount > 0
+    ? `Let's look at the Instagram conversation around ${entity} for ${dateRangeLabel}. I've gathered the posts I could find in this window so we can read the captions, accounts, likes, hashtags, and posting dates together.`
+    : `Let's look at what's happening around ${entity} for ${dateRangeLabel}. I checked for public Instagram posts in this window so we can see whether there is a conversation worth acting on.`;
+}
+
+function defaultFollowUp(intent: string, entity: string): string {
+  if (intent === "count") return "Would you like me to break this down by account or date range?";
+  if (intent.startsWith("business_fit")) {
+    return `Would you like me to compare ${entity} with a competitor?`;
+  }
+  return "Would you like me to focus on a particular account, theme, or the most-liked post?";
+}
+
+function normalizeFollowUp(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.endsWith("?") ? trimmed : fallback;
+}
 
 async function analyzeWithGemini(
   input: GeminiAnalysisInput,
   gemini: GeminiClient,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<InstagramConversation> {
   const postsText = input.posts.map((p, i) =>
     `${i + 1}. ${p.title} | @${p.account} | ${p.date ?? "no date"} | ${p.likes ?? "no likes"} | ${p.comments ?? "no comments"} | ${p.snippet}`
   ).join("\n");
 
-  let systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian English, short sentences, warm but direct, no corporate words, no emoji in results (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Use only the posts you are given; attribute claims ('according to posts by ...') and say 'reported' for allegations. The app shows post counts, the Google estimate, and engagement in the results card. Don't repeat the post count or estimate unless it directly answers the user's question; you may mention engagement or dates when they directly answer the question, using only values present in the posts. Answer the user's actual question, not a generic summary. If you do not understand, ask one short question. If the posts do not cover the question, say so in one line. End with one short, relevant follow-up question on a new line.`;
+  let systemInstruction = `You are Tubitex, a warm, sharp PR and social media intelligence assistant. You help communications teams understand public Instagram conversation. Speak like a kind, calm expert: clear natural English, short sentences, warm but direct, no corporate jargon, no emoji in results. Never open with filler like "Certainly" or "Great question".
+
+Write the reply in three parts:
+- intro: 1-2 conversational sentences that acknowledge the user's request and frame what the results cover, mentioning the subject and date window naturally. This appears before the results table.
+- answer: 2-5 short sentences (or a few bullets only if genuinely useful) that answer the user's actual question using only the supplied posts. Attribute observations to the posts, say "reported" for allegations, and never present these as all Instagram posts or an Instagram-wide total.
+- followUp: one short, specific question that helps the user decide the next step.
+
+Never mention search engines, APIs, scraping tools, data vendors, providers, or how the results were retrieved. Refer only to "these posts", "this search window", or "the results below". Do not invent counts, dates, accounts, captions, engagement, or other facts. If the posts do not cover the question, say so briefly in answer. Do not repeat the post count or estimate unless the user directly asked for a count.`;
 
   if (input.intent === "count") {
-    systemInstruction += `\n\nAnswer the user's count question directly in one short sentence using the supplied retrieved-post count. Describe it as unique posts found by this Google search, not the total number of Instagram posts. Do not infer counts beyond the supplied value.`;
+    systemInstruction += `\n\nIn answer, state only the number of posts shown in this window. Describe it as the number of posts shown here, not an Instagram-wide total. Do not infer any other counts.`;
   } else if (input.intent.startsWith("business_fit")) {
     const businessType = input.intent.split(":")[1] || "business";
-    systemInstruction += `\n\nThe user asks if "${input.entity}" is a good fit for their ${businessType} business. Write 5 to 7 short sentences using ONLY the supplied posts:
+    systemInstruction += `\n\nThe user asks if "${input.entity}" is a good fit for their ${businessType} business. In answer, write 5 to 7 short sentences using ONLY the supplied posts:
 - What the person is mostly known for in these posts
 - The tone of the conversation
 - Any reported controversies (attribute with "reported")
 - How this could fit or clash with a ${businessType} business
 State in one line: "This assessment is based on Instagram posts only."
-End with ONE short follow-up question (e.g., about their target audience).
 Never state allegations as facts. Never invent facts not in the posts.`;
   } else if (input.intent === "narrative") {
-    systemInstruction += `\n\nWrite a short, natural answer (3 to 6 sentences) that directly answers the user's question. Use short bullets only if they genuinely help. Attribute claims. Use "reported" for allegations. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+    systemInstruction += `\n\nIn answer, do NOT give or compute any post counts and do NOT repeat any estimate numbers.`;
   } else {
-    systemInstruction += `\n\nProvide a brief, conversational answer about the Instagram posts for "${input.entity}" that directly answers the user's question. Do NOT give or compute any post counts. Do NOT repeat any estimate numbers.`;
+    systemInstruction += `\n\nIn answer, provide a brief conversational response about the Instagram posts for "${input.entity}". Do NOT give or compute any post counts and do NOT repeat any estimate numbers.`;
   }
 
-  const prompt = `The user asked: "${input.question}"\nUnique Instagram posts retrieved for this search window: ${input.postCount}\n\nInstagram posts for "${input.entity}" (up to 30 posts):\n${postsText}`;
+  const prompt = `The user asked: "${input.question}"\nSubject: ${input.entity}\nDate window: ${input.dateRangeLabel}\nInstagram posts shown in this window: ${input.postCount}\n\nInstagram posts for "${input.entity}" (up to 30 posts):\n${postsText}`;
 
   const response = await gemini.generateStructured({
     systemInstruction,
     userContent: prompt,
     responseSchema: toGeminiSchema(analysisSchema),
-    temperature: 0,
+    temperature: 0.4,
     signal,
   });
 
   const parsed = analysisSchema.safeParse(response);
   if (!parsed.success) {
-    throw new Error(`Gemini analysis returned invalid JSON: ${parsed.error.message}`);
+    throw new Error(`Analysis returned invalid JSON: ${parsed.error.message}`);
   }
 
-  return parsed.data.answer;
+  return {
+    intro: parsed.data.intro.trim(),
+    answer: parsed.data.answer.trim(),
+    followUp: normalizeFollowUp(parsed.data.followUp, defaultFollowUp(input.intent, input.entity)),
+  };
 }
 
 async function chatWithGemini(
@@ -975,7 +1013,7 @@ async function chatWithGemini(
   gemini: GeminiClient,
   signal?: AbortSignal
 ): Promise<string> {
-  const systemInstruction = `You are Tubetix, a friendly and sharp social-media analyst. Talk like a smart, calm person: natural Indian short sentences, warm but direct, no corporate words, no emoji (at most one in casual chat). Never open with filler like 'Certainly' or 'Great question'. Keep it to 1-3 lines. Use the prior conversation when the user is following up. End with a short, natural follow-up question when it fits.`;
+  const systemInstruction = `You are Tubitex, a warm, sharp PR and social media intelligence assistant. You help communications teams understand public Instagram conversation. Speak like a kind, calm expert: natural, clear English, short sentences, warm but direct, no corporate jargon, no emoji. Never open with filler like 'Certainly' or 'Great question'. Keep replies to 1-3 lines, use the prior conversation when the user is following up, and end with a short, natural question when it fits. Never mention search engines, APIs, scraping tools, data vendors, providers, or how any data was retrieved.`;
 
   const schema = z.object({ answer: z.string() });
   const prior = formatHistory(history.filter((turn) => turn.content.trim() !== message.trim()));
@@ -1051,16 +1089,16 @@ export async function runSimpleInstagramResearch(
 
   if (!gemini) {
     return {
-      message: "AI synthesis is unavailable because GEMINI_API_KEY is not configured.",
-      meta: { ...emptyMeta, limitations: ["GEMINI_API_KEY not configured"] }
+      message: "AI analysis is unavailable in this workspace because the analysis key is missing.",
+      meta: { ...emptyMeta, limitations: ["AI analysis is not configured."] }
     };
   }
 
   const serpApiKey = getSerpApiKey();
   if (!serpApiKey) {
     return {
-      message: "Live retrieval is unavailable because SERPAPI_API_KEY is not configured.",
-      meta: { ...emptyMeta, limitations: ["SERPAPI_API_KEY not configured"] }
+      message: "Live search is unavailable in this workspace because the search key is missing.",
+      meta: { ...emptyMeta, limitations: ["Live search is not configured."] }
     };
   }
 
@@ -1140,13 +1178,14 @@ export async function runSimpleInstagramResearch(
   if (error && googleEstimate === null) {
     logger.error("Instagram search failed", { error, entity, queries: queriesTried });
     return {
-      message: "I couldn't reach Google search just now. Want to try again in a minute?",
-      meta: { ...emptyMeta, limitations: [error] },
+      message: "I couldn't complete that search just now. Want me to try again in a minute?",
+      meta: { ...emptyMeta, limitations: ["The search could not complete."] },
     };
   }
 
   const allPosts = sortPostsByLikes(posts);
-  let message = "";
+  const intro = defaultIntro(entity, rangeLabel, allPosts.length);
+  let conversation: InstagramConversation | null = null;
 
   if (allPosts.length > 0) {
     try {
@@ -1164,24 +1203,32 @@ export async function runSimpleInstagramResearch(
         const businessType = businessMatch ? businessMatch[1].trim() : "business";
         analysisIntent = `business_fit:${businessType}`;
       }
-      message = await analyzeWithGemini(
-        { question, posts: postsForGemini, postCount: allPosts.length, intent: analysisIntent, entity },
+      conversation = await analyzeWithGemini(
+        {
+          question,
+          posts: postsForGemini,
+          postCount: allPosts.length,
+          intent: analysisIntent,
+          entity,
+          dateRangeLabel: rangeLabel,
+        },
         gemini,
         signal,
       );
     } catch (error) {
-      logger.warn("Simple Instagram Gemini analysis failed", { error: error instanceof Error ? error.message : "unknown" });
+      logger.warn("Simple Instagram analysis failed", { error: error instanceof Error ? error.message : "unknown" });
     }
   }
 
-  if (!message.trim()) {
-    message = allPosts.length > 0
-      ? intent === "count"
-        ? `I found ${allPosts.length} unique Instagram posts for "${entity}" in this search window. This is the number retrieved by this search, not an Instagram-wide total.`
-        : `I found some Instagram posts for "${entity}" in this window, but I couldn't turn them into a full summary just now. The posts are below — want me to focus on a specific account, theme, or the most-liked post?`
-      : `I couldn't find any Instagram posts for "${entity}" in this date window. Want me to widen the range or try a different spelling?`;
-  }
-  message = ensureFollowUp(message, intent, entity);
+  const fallbackAnswer = allPosts.length > 0
+    ? intent === "count"
+      ? `I'm showing ${allPosts.length} Instagram ${allPosts.length === 1 ? "post" : "posts"} for "${entity}" from this window. This is the number shown here, not an Instagram-wide total.`
+      : `I'm showing some Instagram posts for "${entity}" in this window, but I couldn't turn them into a full summary just now. The posts are below so you can still review them directly.`
+    : `I couldn't find any Instagram posts for "${entity}" in this date window. The conversation may be quiet here, or the window may be too narrow.`;
+
+  const answer = conversation?.answer.trim() || fallbackAnswer;
+  const followUp = normalizeFollowUp(conversation?.followUp, defaultFollowUp(intent, entity));
+  const message = `${(conversation?.intro ?? "").trim() || intro}\n\n${answer}\n\n${followUp}`;
 
   const instagramResults = {
     entity,
@@ -1195,6 +1242,9 @@ export async function runSimpleInstagramResearch(
     estimateProvenance,
     estimateError,
     isCountRequest: intent === "count",
+    intro: (conversation?.intro ?? "").trim() || intro,
+    summary: answer,
+    followUp,
     posts: allPosts.map((post) => ({
       title: post.title,
       url: post.url,
@@ -1210,13 +1260,13 @@ export async function runSimpleInstagramResearch(
   };
 
   const limitations = [
-    "Google result estimates are approximate, can overlap across dorks, and are not Instagram-wide post counts.",
-    "Retrieved unique post candidates are limited to results Google/SerpAPI returned for these queries.",
-    "Caption, engagement, owner, and date fields remain unknown unless returned; Google dates/snippets are not independently verified.",
+    "Result estimates are approximate and are not Instagram-wide post counts.",
+    "Retrieved posts are a sample of public results, not every Instagram post.",
+    "Caption, engagement, account, and date fields remain unknown unless returned; dates and snippets are not independently verified.",
   ];
   const warnings = [
-    ...(queriesAtPageLimit.length ? [`${queriesAtPageLimit.length} dork(s) reached a requested page ceiling; more results may exist.`] : []),
-    ...(paginationErrors.length ? [`SerpAPI stopped pagination early for ${paginationErrors.length} dork(s).`] : []),
+    ...(queriesAtPageLimit.length ? ["A page limit was reached; more results may exist."] : []),
+    ...(paginationErrors.length ? ["Some result pages could not be loaded; coverage may be partial."] : []),
   ];
 
   const meta: ResearchMeta = {

@@ -26,7 +26,6 @@ import type { Conversation } from "@/types";
 export interface ConversationItemProps {
   conversation: Conversation;
   isActive: boolean;
-  collapsed?: boolean;
   onSelect: () => void;
   onRename: (title: string) => void;
   onTogglePin: () => void;
@@ -35,11 +34,6 @@ export interface ConversationItemProps {
 }
 
 const MAX_TITLE_WORDS = 5;
-
-function initials(title: string): string {
-  const words = title.trim().split(/\s+/).slice(0, 2);
-  return words.map((word) => word[0]?.toUpperCase() ?? "").join("") || "?";
-}
 
 function shortTitle(title: string): string {
   const words = title.trim().split(/\s+/).filter(Boolean);
@@ -75,7 +69,6 @@ function toMarkdown(conversation: Conversation): string {
 export function ConversationItem({
   conversation,
   isActive,
-  collapsed = false,
   onSelect,
   onRename,
   onTogglePin,
@@ -109,25 +102,6 @@ export function ConversationItem({
     link.remove();
     URL.revokeObjectURL(url);
   };
-
-  if (collapsed) {
-    return (
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-current={isActive ? "page" : undefined}
-        title={conversation.title}
-        className={cn(
-          "mx-auto flex size-9 items-center justify-center rounded-md text-xs font-medium transition-colors focus-visible:outline-none",
-          isActive
-            ? "bg-sidebar-accent text-sidebar-accent-foreground"
-            : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
-        )}
-      >
-        {initials(conversation.title)}
-      </button>
-    );
-  }
 
   if (editing) {
     return (

@@ -96,25 +96,25 @@ export function SettingsDialog({
         ) : (
           <div className="space-y-1">
             <StatusRow
-              label="Gemini"
-              detail={health.integrations.gemini.configured ? health.integrations.gemini.model : "GEMINI_API_KEY missing"}
+              label="AI analysis"
+              detail={health.integrations.gemini.configured ? "Analysis enabled" : "Analysis key missing"}
               configured={health.integrations.gemini.configured}
             />
             <StatusRow
-              label="SerpAPI"
-              detail={health.integrations.serpapi.configured ? "Web search enabled" : "SERPAPI_API_KEY missing"}
+              label="Live search"
+              detail={health.integrations.serpapi.configured ? "Search enabled" : "Search key missing"}
               configured={health.integrations.serpapi.configured}
             />
             <StatusRow
-              label="NewsAPI"
-              detail={health.integrations.newsapi.configured ? "News search enabled" : "Optional — NEWSAPI_API_KEY missing"}
+              label="News search"
+              detail={health.integrations.newsapi.configured ? "News search enabled" : "Optional — news key missing"}
               configured={health.integrations.newsapi.configured}
             />
             <StatusRow
-              label="Apify"
+              label="Deep search"
               detail={health.integrations.apify?.configured
-                ? "Deep thinking Instagram search enabled"
-                : "Set APIFY_API_TOKEN and APIFY_INSTAGRAM_ACTOR_ID"}
+                ? "Deep search enabled"
+                : "Deep search key missing"}
               configured={health.integrations.apify?.configured ?? false}
             />
             <Separator className="my-3" />

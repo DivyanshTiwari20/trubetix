@@ -1,6 +1,6 @@
 export const APP_NAME = "Tubitex";
 export const APP_DESCRIPTION =
-  "Tubitex is a PR intelligence assistant. Ask a question about a client, topic, or competitor and get an evidence-backed briefing drawn from live web and news coverage.";
+  "Tubitex is a PR and social media intelligence assistant. Ask a question about a client, topic, or competitor and get an evidence-backed briefing drawn from live conversation and coverage.";
 
 export const LIMITS = {
   questionMaxLength: 2000,

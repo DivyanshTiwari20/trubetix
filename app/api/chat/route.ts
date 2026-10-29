@@ -87,7 +87,7 @@ async function lightweightResponse(message: string, conversationId: string): Pro
   const greetingMessage: ChatMessage = {
     id: createId("msg"),
     role: "assistant",
-    content: "Hello! How can I help you today?",
+    content: "Hi! I'm Tubitex. I help with PR and social media questions — what would you like to look into?",
     createdAt: new Date().toISOString(),
     status: "complete",
     analysis: null,
@@ -210,13 +210,13 @@ export async function POST(request: Request): Promise<Response> {
       const messageObj: ChatMessage = {
         id: createId("msg"),
         role: "assistant",
-        content: "Deep thinking could not complete this Instagram search. Please check the Apify/Gemini setup and try again; Google/SerpAPI was not used as a fallback.",
+        content: "Deep search could not complete this Instagram search. Check the workspace configuration and try again.",
         createdAt: new Date().toISOString(),
         status: "degraded",
         analysis: null,
         sources: [],
         meta: null,
-        error: "Deep thinking request failed without a provider fallback.",
+        error: "Deep search request failed; no alternate source was used.",
         feedback: null,
       };
       return NextResponse.json(chatResponseSchema.parse({ conversationId, message: messageObj }));

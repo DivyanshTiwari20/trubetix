@@ -15,7 +15,7 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
   }, [messages.length, isGenerating]);
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+    <div className="mx-auto w-full max-w-[48rem] space-y-6 px-4 py-6">
       {messages.map((message, index) => {
         const isLast = index === messages.length - 1;
         const canRegenerate = message.role === "assistant" && isLast && !isGenerating;

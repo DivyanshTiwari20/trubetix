@@ -23,6 +23,17 @@ function integrationLabel(configured: boolean, fallback: string): string {
   return configured ? "Configured" : fallback;
 }
 
+const CAPABILITY_LABELS: Record<string, string> = {
+  serpapi: "Live search",
+  apify: "Deep search",
+  newsapi: "News search",
+  instagram: "Instagram profile",
+};
+
+function capabilityLabel(id: string): string {
+  return CAPABILITY_LABELS[id] ?? "Search";
+}
+
 export function ResearchMetaDetails({ meta }: { meta: ResearchMeta }) {
   return (
     <details className="group rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
@@ -45,20 +56,15 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
         <dl>
           <Row label="Entity" value={results.entity} />
           <Row label="Date range" value={results.dateRangeLabel} />
-          <Row label="Retrieval source" value={results.retrievalSource === "apify" ? "Apify keyword/hashtag search" : "Google dorking / SerpAPI"} />
+          <Row label="Search coverage" value={results.retrievalSource === "apify" ? "Deep search" : "Live search"} />
           {results.retrievalSource === "apify" ? null : (
             <Row
-              label="Google estimated results"
+              label="Estimated matching results"
               value={formatCompactCount(results.googleEstimatedResults) || "Unavailable"}
             />
           )}
           <Row label="Posts shown" value={results.posts.length.toLocaleString("en-US")} />
         </dl>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {results.retrievalSource === "apify"
-            ? "Provider results are limited, locally date-filtered, and not an Instagram-wide count."
-            : "Google's estimate is approximate, not an Instagram-wide post count."}
-        </p>
       </div>
     );
   }
@@ -77,8 +83,12 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
         <Row label="Included in analysis" value={String(meta.resultsIncluded)} />
         <Row label="Excluded (undated)" value={String(meta.undatedExcluded)} />
         <Row
-          label="Providers"
-          value={meta.providersSearched.length > 0 ? meta.providersSearched.join(", ") : "none"}
+          label="Search coverage"
+          value={
+            meta.providersSearched.length > 0
+              ? [...new Set(meta.providersSearched.map(capabilityLabel))].join(", ")
+              : "none"
+          }
         />
         <Row
           label="Source types"
@@ -94,29 +104,20 @@ export function ResearchMetaBody({ meta }: { meta: ResearchMeta }) {
       <Separator />
 
       <div className="space-y-1">
-        <p className="font-medium text-muted-foreground">Queries</p>
-        <ul className="list-disc space-y-0.5 pl-4">
-          {meta.queries.map((query) => (
-            <li key={query}>{query}</li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="space-y-1">
         <p className="font-medium text-muted-foreground">Integrations</p>
         <div className="flex flex-wrap gap-1">
           <Badge variant={meta.integrations.gemini.configured ? "success" : "warning"}>
-            Gemini: {integrationLabel(meta.integrations.gemini.configured, "off")}
+            AI analysis: {integrationLabel(meta.integrations.gemini.configured, "off")}
           </Badge>
           <Badge variant={meta.integrations.serpapi.configured ? "success" : "warning"}>
-            SerpAPI: {integrationLabel(meta.integrations.serpapi.configured, "off")}
+            Live search: {integrationLabel(meta.integrations.serpapi.configured, "off")}
           </Badge>
           <Badge variant={meta.integrations.newsapi.configured ? "success" : "outline"}>
-            NewsAPI: {integrationLabel(meta.integrations.newsapi.configured, "off")}
+            News search: {integrationLabel(meta.integrations.newsapi.configured, "off")}
           </Badge>
           {meta.integrations.apify ? (
             <Badge variant={meta.integrations.apify.configured ? "success" : "warning"}>
-              Apify: {integrationLabel(meta.integrations.apify.configured, "off")}
+              Deep search: {integrationLabel(meta.integrations.apify.configured, "off")}
             </Badge>
           ) : null}
         </div>
