@@ -1,6 +1,18 @@
 import { STORAGE_KEYS } from "@/lib/config";
 import { conversationSchema } from "@/lib/validation";
+import { titleFromQuestion, truncate } from "@/lib/utils";
 import type { Conversation } from "@/types";
+
+const LEGACY_TITLE_MAX = 60;
+
+function withModernTitle(conversation: Conversation): Conversation {
+  const firstUser = conversation.messages.find((message) => message.role === "user");
+  if (!firstUser) return conversation;
+  const question = firstUser.content.replace(/\s+/g, " ").trim();
+  const legacyTitle = truncate(question, LEGACY_TITLE_MAX);
+  if (conversation.title !== question && conversation.title !== legacyTitle) return conversation;
+  return { ...conversation, title: titleFromQuestion(question) };
+}
 
 export interface ConversationStore {
   load(): Conversation[];
@@ -28,7 +40,7 @@ export class LocalStorageConversationStore implements ConversationStore {
       const conversations: Conversation[] = [];
       for (const entry of parsed) {
         const result = conversationSchema.safeParse(entry);
-        if (result.success) conversations.push(result.data);
+        if (result.success) conversations.push(withModernTitle(result.data));
       }
       return conversations;
     } catch {

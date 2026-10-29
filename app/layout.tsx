@@ -16,9 +16,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: `${APP_NAME} — PR Intelligence`,
+  title: `${APP_NAME} �?" PR Intelligence`,
   description: APP_DESCRIPTION,
 };
+
+const themeInitScript = `(function(){try{var stored=localStorage.getItem("theme");var theme=stored==="light"||stored==="dark"||stored==="system"?stored:"system";var resolved=theme==="system"?(window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"):theme;var root=document.documentElement;root.classList.remove("light","dark");root.classList.add(resolved);root.style.colorScheme=resolved;}catch(error){}})();`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
@@ -28,6 +30,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="h-full">
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

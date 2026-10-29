@@ -88,7 +88,7 @@ function Shell() {
       <aside
         className={cn(
           "hidden shrink-0 border-r border-sidebar-border bg-sidebar transition-[width] md:flex",
-          collapsed ? "w-16" : "w-72",
+          collapsed ? "w-16" : "w-[15.5rem]",
         )}
       >
         <div className="w-full">
